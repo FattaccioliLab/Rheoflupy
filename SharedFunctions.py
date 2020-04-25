@@ -108,7 +108,30 @@ def PrintAndLog(strMsg, LogFile, addFirst="\n", flushBuffer=True):
 def CastFloatListToInt(myList):
     for i in range(len(myList)):
         myList[i] = int(myList[i])
-        
+    
+def FilterStringList(my_list, Prefix='', Ext='', Step=-1, FilterString='', ExcludeStrings=[], Verbose=0):
+    if Verbose>0:
+        print('before filter: {0} files'.format(len(my_list)))
+    if (len(Prefix) > 0):
+        my_list = [i for i in my_list if str(i).find(Prefix) == 0]
+    if (len(Ext) > 0):
+        my_list = [i for i in my_list if i[-len(Ext):] == Ext]
+    if (len(FilterString) > 0):
+        my_list = [i for i in my_list if FilterString in i]
+    if (len(ExcludeStrings) > 0):
+        for excl_str in ExcludeStrings:
+            my_list = [i for i in my_list if excl_str not in i]
+    if Verbose>0:
+        print('after filter: {0} files'.format(len(my_list)))
+    if (Step > 0):
+        resList = []
+        for idx in range(len(my_list)):
+            if (idx % Step == 0):
+                resList.append(my_list[idx])
+        return resList
+    else:
+        return my_list
+    
 def FindFileNames(FolderPath, Prefix='', Ext='', Step=-1, FilterString='', ExcludeStrings=[], Verbose=0, AppendFolder=False):
     if Verbose>0:
         print('Sarching {0}{1}*{2}'.format(FolderPath, Prefix, Ext))
@@ -116,61 +139,43 @@ def FindFileNames(FolderPath, Prefix='', Ext='', Step=-1, FilterString='', Exclu
     for (dirpath, dirnames, filenames) in os.walk(FolderPath):
         FilenameList.extend(filenames)
         break
-    if Verbose>0:
-        print('before filter: {0} files'.format(len(FilenameList)))
-    if (len(Prefix) > 0):
-        FilenameList = [i for i in FilenameList if str(i).find(Prefix) == 0]
-    if (len(Ext) > 0):
-        FilenameList = [i for i in FilenameList if i[-len(Ext):] == Ext]
-    if (len(FilterString) > 0):
-        FilenameList = [i for i in FilenameList if FilterString in i]
-    if (len(ExcludeStrings) > 0):
-        for excl_str in ExcludeStrings:
-            FilenameList = [i for i in FilenameList if excl_str not in i]
-    if Verbose>0:
-        print('after filter: {0} files'.format(len(FilenameList)))
+    FilenameList = FilterStringList(filenames, Prefix=Prefix, Ext=Ext, Step=Step, FilterString=FilterString,\
+                            ExcludeStrings=ExcludeStrings, Verbose=Verbose)
     if AppendFolder:
         for i in range(len(FilenameList)):
             FilenameList[i] = FolderPath + FilenameList[i]
-    if (Step > 0):
-        resList = []
-        for idx in range(len(FilenameList)):
-            if (idx % Step == 0):
-                resList.append(FilenameList[idx])
-        return resList
-    else:
-        return FilenameList
+    return FilenameList
 
 """
 FirstLevelOnly: if True, only returns immediate subdirectories, otherwise returns every directory right down the tree
 Returns: list with complete paths of each subdirectory
 """
-def FindSubfolders(FolderPath, FirstLevelOnly=True):
+def FindSubfolders(FolderPath, FirstLevelOnly=True, Prefix='', Step=-1, FilterString='', ExcludeStrings=[], Verbose=0):
     if FirstLevelOnly:
-        return [os.path.join(FolderPath, o) for o in os.listdir(FolderPath) if os.path.isdir(os.path.join(FolderPath,o))]
+        if (Prefix == ''):
+            reslist = [os.path.join(FolderPath, o) for o in os.listdir(FolderPath) if os.path.isdir(os.path.join(FolderPath,o))]
+        else:
+            reslist = [os.path.join(FolderPath, o) for o in os.listdir(FolderPath) if (os.path.isdir(os.path.join(FolderPath,o)) and o[:len(Prefix)]==Prefix)]
     else:
-        return [x[0] for x in os.walk(FolderPath)]
+        reslist = [x[0] for x in os.walk(FolderPath)]
+    return FilterStringList(reslist, Prefix='', Ext='', Step=Step, FilterString=FilterString, ExcludeStrings=ExcludeStrings, Verbose=Verbose)
     
 """
 FilenameList:    list of filenames
-index_pos:       index of the desired integer in the list of integer found in each filename
-SearchSubstrings: list of strings. If i-th string (0 based) is found in filename, index will be incremented by (i+1)*IndexAddIfSubstring
-                 None not to search for substrings
-IndexAddIfSubstring: integer. Number to add if SearchSubstrings is found
+index_pos:       index of the desired integer in the list of integer found in each string
 """
-def ExtractIndexFromFilenames(FilenameList, index_pos=0, SearchSubstrings=None, IndexAddIfSubstring=0):
+def ExtractIndexFromStrings(StringList, index_pos=0, index_notfound=-1):
     res = []
-    for cur_name in FilenameList:
+    for cur_name in StringList:
         allInts = AllIntInStr(cur_name)
         if (len(allInts) > 0):
-            val = allInts[index_pos]
-            if SearchSubstrings!=None:
-                for i in range(len(SearchSubstrings)):
-                    if SearchSubstrings[i] in cur_name:
-                        val += IndexAddIfSubstring * (i+1)
-            res.append(val)
+            try:
+                val = allInts[index_pos]
+                res.append(val)
+            except:
+                res.append(index_notfound)
         else:
-            res.append(-1)
+            res.append(index_notfound)
     return res
 
 def ConfigGet(config, sect, key, default=None, cast_type=None, verbose=1):
@@ -250,7 +255,7 @@ def LoadFloatTuplesFromFile(FileName, SkipRow=-1, Columns=None, Boundaries=None,
                                 if (read_float > Boundaries[0] and read_float < Boundaries[1]):
                                     cur_tuple.append(read_float)
                                 else:
-                                    print("Warning: skipped element {0} because out of boundaries".format(int(words[0])))
+                                    print("Warning: skipped element {0} because out of boundaries".format(read_float))
                         #except:
                         #    pass
                 if len(cur_tuple) > 1:
