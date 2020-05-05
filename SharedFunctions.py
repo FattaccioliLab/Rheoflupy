@@ -1,8 +1,18 @@
 import numpy as np
-import json
+import scipy as sp
+from scipy import signal, spatial
 import os
 import re
 import shutil
+import sys
+import pkg_resources
+pkg_installed = {pkg.key for pkg in pkg_resources.working_set}
+if 'json' in pkg_installed:
+    import json
+    use_json = True
+else:
+    import ast
+    use_json = False
   
 def AllIntInStr(my_string):
     arr_str = re.findall(r'\d+', my_string)
@@ -86,6 +96,12 @@ def RenameFile(oldFileName, newFileName, forceOverwrite=False):
     else:
         raise IOError('RenameFile error: filename ' + oldFileName + ' not found.')
 
+def RenameDirectory(oldName, newName):
+    if (CheckFolderExists(newName)):
+        raise ValueError('RenameFolder error: destination name "' + str(newName) + '" already present on disk')
+    else:
+        os.rename(oldName, newName)
+
 def DeleteFile(fileName):
     if (CheckFileExists(fileName)):
         os.remove(fileName)
@@ -139,7 +155,7 @@ def FindFileNames(FolderPath, Prefix='', Ext='', Step=-1, FilterString='', Exclu
     for (dirpath, dirnames, filenames) in os.walk(FolderPath):
         FilenameList.extend(filenames)
         break
-    FilenameList = FilterStringList(filenames, Prefix=Prefix, Ext=Ext, Step=Step, FilterString=FilterString,\
+    FilenameList = FilterStringList(FilenameList, Prefix=Prefix, Ext=Ext, Step=Step, FilterString=FilterString,\
                             ExcludeStrings=ExcludeStrings, Verbose=Verbose)
     if AppendFolder:
         for i in range(len(FilenameList)):
@@ -182,7 +198,10 @@ def ConfigGet(config, sect, key, default=None, cast_type=None, verbose=1):
     if (config.has_option(sect, key)):
         res = config[sect][key]
         if (str(res)[0] in ['[','(', '{']):
-            res = json.loads(res)
+            if use_json:
+                res = json.loads(res)
+            else:
+                res = ast.literal_eval(res)
         if (type(res) in [list,tuple]):
             for i in range(len(res)):
                 if (type(res[i]) in [list,tuple]):
@@ -206,6 +225,9 @@ def ConfigGet(config, sect, key, default=None, cast_type=None, verbose=1):
         if (verbose>0):
             print('"' + key + '" not found in section "' + sect + '": default value ' + str(default) + ' returned.')
         return default
+
+def ConfigSet(config, sect, key, value):
+    config.set(sect, key, value)
 
 # Boundaries: (min_val, max_val) acceptable values.
 # if Boundaries != None, values outside boundaries will be discarded
@@ -266,3 +288,107 @@ def LoadFloatTuplesFromFile(FileName, SkipRow=-1, Columns=None, Boundaries=None,
                     if MaxNumRows < len(listRes):
                         break
     return listRes 
+
+
+def query_yes_no(question, default="no"):
+    valid = {"yes": True, "y": True, "Y": True, "ye": True,
+             "no": False, "n": False, "N": False}
+    if default is None:
+        prompt = " [y/n] "
+    elif default == "yes":
+        prompt = " [Y/n] "
+    elif default == "no":
+        prompt = " [y/N] "
+    else:
+        raise ValueError("invalid default answer: '%s'" % default)
+
+    while True:
+        sys.stdout.write(question + prompt)
+        choice = input().lower()
+        if default is not None and choice == '':
+            return valid[default]
+        elif choice in valid:
+            return valid[choice]
+        else:
+            sys.stdout.write("Please respond with 'yes' or 'no' "
+                             "(or 'y' or 'n').\n")
+
+def query_string(question, accept_if_substr=''):
+    while True:
+        sys.stdout.write(question + ' >>> ')
+        choice = input().lower()
+        if accept_if_substr in choice:
+            return choice
+        else:
+            sys.stdout.write("Answer should contain substring '" + accept_if_substr + "'.\n")
+            
+def LinearFit(x, y, return_residuals=False, mask=None, nonan=True, catchex=False):
+    if (nonan):
+        use_mask = np.logical_or(np.isnan(x), np.isnan(y))
+        if (mask is None):
+            use_mask = np.logical_or(mask, use_mask)            
+    if (use_mask is None):
+        xma, yma = x, y
+    else:
+        xma = np.ma.masked_array(x, mask=use_mask).compressed()
+        yma = np.ma.masked_array(y, mask=use_mask).compressed()
+    if (len(xma) >= 1):
+        if (catchex):
+            try:
+                slope, residuals, _, _ = np.linalg.lstsq(np.asarray(xma)[:,np.newaxis], yma, rcond=None)
+            except np.linalg.LinAlgError as err:
+                if 'SVD did not converge' in str(err):
+                    slope, residuals = [np.nan], [np.nan]
+                else:
+                    raise
+        else:
+            slope, residuals, _, _ = np.linalg.lstsq(np.asarray(xma)[:,np.newaxis], yma, rcond=None)
+    #if (len(xma) == 1):
+    #    slope, residuals = [yma[0]/xma[0]], [np.nan]
+    else:
+        slope, residuals = [np.nan], [np.nan]
+    if (return_residuals):
+        return slope[0], residuals[0]
+    else:
+        return slope[0]
+
+def downsample2d(inputArray, kernelSize, normArr=None):
+    if (kernelSize==1):
+        return inputArray
+    else:
+        average_kernel = np.ones((kernelSize,kernelSize))*np.power(1.0*kernelSize, -2)
+        if normArr is not None:
+            inputArray = np.true_divide(inputArray, normArr)
+        blurred_array = sp.signal.convolve2d(inputArray, average_kernel, mode='same', boundary='symm')
+        downsampled_array = blurred_array[::kernelSize,::kernelSize]
+        return downsampled_array
+
+'''
+norm: it depends on norm_type:
+- norm_type=='1D' --> 1D Array with scalar normalization factors, one per z slice
+- norm_type=='2D' --> 2D Array with xy-resolved normalization factors, common to all z slices
+- norm_type=='3D' --> 3D Array with xyz-resolved normalization factors
+'''
+def downsample3d(inputArray, kernelSizeXY, kernelSizeZ, norm=None, norm_type='1D'):
+    first_smaller = downsample2d(inputArray[0], kernelSizeXY)
+    smaller = np.zeros((len(inputArray)//kernelSizeZ, first_smaller.shape[1], first_smaller.shape[0]))
+    num_frames = np.zeros(smaller.shape[0])
+    for i in range(0, len(inputArray), kernelSizeZ):
+        smaller[i//kernelSizeZ] = np.zeros((first_smaller.shape[1], first_smaller.shape[0]))
+        for j in range(kernelSizeZ):
+            num_frames[i//kernelSizeZ]+=1
+            if norm is not None:
+                if norm_type=='1D':
+                    new_frame = np.true_divide(downsample2d(inputArray[i+j], kernelSizeXY), norm[i+j])
+                elif norm_type=='2D':
+                    new_frame = downsample2d(inputArray[i+j], kernelSizeXY, norm)
+                elif norm_type=='3D':
+                    new_frame = downsample2d(inputArray[i+j], kernelSizeXY, norm[i+j])
+                else:
+                    new_frame = downsample2d(inputArray[i+j], kernelSizeXY)
+            else:
+                new_frame = downsample2d(inputArray[i+j], kernelSizeXY)
+            smaller[i//kernelSizeZ] = np.add(smaller[i//kernelSizeZ], new_frame)
+    for i in range(smaller.shape[0]):
+        smaller[i] = np.true_divide(smaller[i], num_frames[i])
+    return smaller

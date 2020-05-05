@@ -239,6 +239,14 @@ def LoadMIfile(MIfile_name, MI_info=None, returnHeader=False):
     else:
         return MIfile_handle
 
+def ReadMIfileList(MIfile_names, MI_info=None, Step=-1, closeAfter=True, zRange=None, asArray=False):
+    res_4D = []
+    for cur_fname in MIfile_names:
+        res_4D.append(ReadMIfile(cur_fname, MI_info=MI_info, Step=Step, closeAfter=closeAfter, zRange=zRange))
+    if (asArray):
+        res_4D = np.asarray(res_4D)
+    return res_4D
+
 def ReadMIfile(MIfile_name, MI_info=None, Step=-1, closeAfter=True, zRange=None):
     MIfile_handle, MI_info = LoadMIfile(MIfile_name, MI_info, returnHeader=True)
     if zRange==None:
