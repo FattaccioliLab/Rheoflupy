@@ -385,59 +385,85 @@ if __name__ == '__main__':
     else:
         
         SharedFunctions.CheckCreateFolder(plot_root)
+        
+        # Load refined velocities
         refinedv_filenames = [SharedFunctions.FindFileNames(aggr_root, Prefix=refinedv_prefix+'x', Ext='.raw'),\
                               SharedFunctions.FindFileNames(aggr_root, Prefix=refinedv_prefix+'y', Ext='.raw')]
-    
         if (len(refinedv_filenames[0]) <= 0):
             raise ValueError('No ' + str(refinedv_prefix+'x') + '*.raw file in folder ' + str(aggr_root))
         if (len(refinedv_filenames[1]) <= 0):
             raise ValueError('No ' + str(refinedv_prefix+'y') + '*.raw file in folder ' + str(aggr_root))
-        
         imgInfo = BinaryImgs.MIinfoFromName(refinedv_filenames[0][0], byteFormat='f')
         imgInfo['hdr_size'] = 0
         refinedv_data = BinaryImgs.ReadMIfileList([aggr_root+refinedv_filenames[0][0],aggr_root+refinedv_filenames[1][0]], MI_info=imgInfo, asArray=True)
         
+        # Image sequence (just to get image dimensions and number of images)
         imSeq = ImageSequence(froot+SharedFunctions.ConfigGet(config, 'input', 'filter_frameA', '', str)+'*'+img_ext)
-        piv_coords = openpiv.process.get_coordinates(image_size=imSeq[0].shape, window_size=settings.windowsizes[settings.iterations-1],\
+        imShape = imSeq[0].shape
+        piv_coords = openpiv.process.get_coordinates(image_size=imShape, window_size=settings.windowsizes[settings.iterations-1],\
                                         overlap=settings.overlap[settings.iterations-1])
-        bin_xy = 4
-        bin_z = 4
+        # Binning
+        bin_xy = SharedFunctions.ConfigGet(config, 'plot', 'bin_xy', 1, int)
+        bin_z = SharedFunctions.ConfigGet(config, 'plot', 'bin_z', 1, int)
         piv_coords_binned = [SharedFunctions.downsample2d(piv_coords[0], bin_xy),\
                              SharedFunctions.downsample2d(piv_coords[1], bin_xy)]
-        num_times = len(refinedv_data[0]) // bin_z
-        refinedv_data_binned = [SharedFunctions.downsample3d(refinedv_data[0][:num_times*bin_z], bin_xy, bin_z),\
-                                SharedFunctions.downsample3d(refinedv_data[1][:num_times*bin_z], bin_xy, bin_z)]
-        imSeq_binned = SharedFunctions.downsample3d(imSeq[:num_times*bin_z], 1, bin_z)
-        refinedv_data_binz = [SharedFunctions.downsample3d(refinedv_data[0][:num_times*bin_z], 1, bin_z),\
-                                SharedFunctions.downsample3d(refinedv_data[1][:num_times*bin_z], 1, bin_z)]
-        diverg3D = np.add(np.gradient(refinedv_data_binz[0])[2], np.gradient(refinedv_data_binz[1])[1])
-        maxalpha = np.power(np.nanmax(np.absolute(diverg3D[:-3])), 0.3)
-        cmap_bounds = [0, np.nanmax(diverg3D[:-3])]
+        refinedv_data_binned = [SharedFunctions.downsample3d(refinedv_data[0], bin_xy, bin_z),\
+                                SharedFunctions.downsample3d(refinedv_data[1], bin_xy, bin_z)]
+        imSeq_binned = SharedFunctions.downsample3d(imSeq, 1, bin_z)
+        refinedv_data_binz = [SharedFunctions.downsample3d(refinedv_data[0], 1, bin_z),\
+                              SharedFunctions.downsample3d(refinedv_data[1], 1, bin_z)]
+
+        # Compute divergence and related options
+        if (SharedFunctions.ConfigGet(config, 'plot', 'plot_divergence', False, bool)):
+            diverg3D = np.add(np.gradient(refinedv_data_binz[0])[2], np.gradient(refinedv_data_binz[1])[1])
+            divalphaexp = SharedFunctions.ConfigGet(config, 'plot', 'div_alpha_pwr', 0.0, float)
+            divmaxalpha = np.power(np.nanmax(np.absolute(diverg3D[:-3])), divalphaexp)
+            div_alpha_normbounds = np.multiply(divmaxalpha, SharedFunctions.ConfigGet(config, 'plot', 'div_alpha_normbounds', [0.0, 1.0], float))
+            div_alphaclip = SharedFunctions.ConfigGet(config, 'plot', 'div_alphaclip', [0.0, 1.0], float)
+            div_cmap = plt.cm.get_cmap(SharedFunctions.ConfigGet(config, 'plot', 'div_cmap', 'hot', str))
+            div_cmap_bounds = [0, np.nanmax(diverg3D[:-3])]
+        else:
+            diverg3D = None
+
+        if (SharedFunctions.ConfigGet(config, 'plot', 'plot_curl', False, bool)):
+            curl3D = np.subtract(np.gradient(refinedv_data_binz[1])[2], np.gradient(refinedv_data_binz[0])[1])
+            curl_alphaexp = SharedFunctions.ConfigGet(config, 'plot', 'curl_alpha_pwr', 0.0, float)
+            curl_maxalpha = np.power(np.nanmax(np.absolute(curl3D[:-7])), curl_alphaexp)
+            curl_alpha_normbounds = np.multiply(divmaxalpha, SharedFunctions.ConfigGet(config, 'plot', 'curl_alpha_normbounds', [0.0, 1.0], float))
+            curl_alphaclip = SharedFunctions.ConfigGet(config, 'plot', 'curl_alphaclip', [0.0, 1.0], float)
+            curl_cmap = plt.cm.get_cmap(SharedFunctions.ConfigGet(config, 'plot', 'curl_cmap', 'cool_r', str))
+            curl_cmap_bounds = [np.nanmin(np.absolute(curl3D[:-7])), np.nanmax(np.absolute(curl3D[:-7]))]
+        else:
+            curl3D = None
+        
+        # Save all frames
         for tidx in range(min(len(imSeq), len(refinedv_data_binned[0]))):
             fig, ax = plt.subplots(figsize=(10,10))
-            ax.imshow(imSeq_binned[tidx], extent=[0, 1024, 0, 1024], origin='upper', vmin=30, vmax=80, cmap='Greys_r')
-            ax.quiver(piv_coords_binned[0], piv_coords_binned[1], refinedv_data_binned[0][tidx], -refinedv_data_binned[1][tidx], color='blue', linewidth=2,\
-                      scale=1)
-            x_str, y_str = np.unique(piv_coords[0].flatten())[::bin_xy], np.unique(piv_coords[1].flatten())[::bin_xy]
-            #ax.streamplot(x_str, y_str, refinedv_data_binned[0][tidx], -refinedv_data_binned[1][tidx],\
-            #              density=[1,0.6], linewidth=1.0, color='r', cmap='hot', arrowsize=1.0, minlength=0.04)
-            
-            diverg = diverg3D[tidx]
-            my_cmap = plt.cm.get_cmap('hot')
-            alphas = Normalize(vmin=0.6*maxalpha, vmax=0.9*maxalpha, clip=True)(np.power(np.absolute(np.nan_to_num(diverg)), 0.3))   # Create an alpha channel based on weight values. Any value whose absolute value is > .0001 will have zero transparency
-            alphas = np.clip(alphas, 0.0, 0.95)  # alpha value clipped at the bottom at .4
-            print(np.max(alphas))
-            colors = Normalize(vmin=cmap_bounds[0], vmax=cmap_bounds[1])(diverg) # Normalize the colors b/w 0 and 1, we'll then pass an MxNx4 array to imshow
-            colors = my_cmap(colors)
-            colors[..., -1] = alphas   # Now set the alpha channel to the one we created above
-            #cur_imshow_kw = {'extent' : [PIV_avg['x'][0]*0.5, PIV_avg['x'][-1]+PIV_avg['x'][0]*0.5,\
-            #                               PIV_avg['y'][-1]+PIV_avg['y'][0]*0.5, PIV_avg['y'][0]*0.5],}
-            #if False:
-            #    cur_imshow_kw['vmin'] = _config['OUT']['overlay_vbounds'][0]
-            #    cur_imshow_kw['vmax'] = _config['OUT']['overlay_vbounds'][1]
-            ax.imshow(colors, extent=[0, 1024, 0, 1024], origin='upper')#, **cur_imshow_kw)
+            plot_vbounds = SharedFunctions.ConfigGet(config, 'plot', 'plot_vbounds', [np.min(imSeq_binned[tidx]), np.max(imSeq_binned[tidx])], float)
+            ax.imshow(imSeq_binned[tidx], extent=[0, imShape[0], 0, imShape[1]], origin='upper', vmin=plot_vbounds[0], vmax=plot_vbounds[1], cmap='Greys_r')
+            if (SharedFunctions.ConfigGet(config, 'plot', 'plot_quiver', False, bool)):
+                ax.quiver(piv_coords_binned[0], piv_coords_binned[1], refinedv_data_binned[0][tidx], -refinedv_data_binned[1][tidx], color='blue', linewidth=2, scale=1)
+            if (SharedFunctions.ConfigGet(config, 'plot', 'plot_streamlines', False, bool)):
+                x_str, y_str = np.unique(piv_coords[0].flatten())[::bin_xy], np.unique(piv_coords[1].flatten())[::bin_xy]
+                ax.streamplot(x_str, y_str, refinedv_data_binned[0][tidx], -refinedv_data_binned[1][tidx],\
+                              density=[1,0.6], linewidth=1.0, color='r', cmap='hot', arrowsize=1.0, minlength=0.04)
+            if (diverg3D is not None):
+                cur_divdata = diverg3D[tidx]
+                divalphas = Normalize(vmin=div_alpha_normbounds[0], vmax=div_alpha_normbounds[1], clip=True)(np.power(np.absolute(np.nan_to_num(cur_divdata)), divalphaexp))
+                divalphas = np.clip(divalphas, div_alphaclip[0], div_alphaclip[1])
+                divcolors = Normalize(vmin=div_cmap_bounds[0], vmax=div_cmap_bounds[1])(cur_divdata) # Normalize the colors b/w 0 and 1, we'll then pass an MxNx4 array to imshow
+                divcolors = div_cmap(divcolors)
+                divcolors[..., -1] = divalphas
+                ax.imshow(divcolors, extent=[0, imShape[0], 0, imShape[1]], origin='upper')
+            if (curl3D is not None):
+                cur_curldata = curl3D[tidx]
+                curlalphas = Normalize(vmin=curl_alpha_normbounds[0], vmax=curl_alpha_normbounds[1], clip=True)(np.power(np.absolute(np.nan_to_num(cur_curldata)), curl_alphaexp))
+                curlalphas = np.clip(curlalphas, curl_alphaclip[0], curl_alphaclip[1])
+                curlcolors = Normalize(vmin=curl_cmap_bounds[0], vmax=curl_cmap_bounds[1])(cur_curldata) # Normalize the colors b/w 0 and 1, we'll then pass an MxNx4 array to imshow
+                curlcolors = curl_cmap(curlcolors)
+                curlcolors[..., -1] = curlalphas
+                ax.imshow(curlcolors, extent=[0, imShape[0], 0, imShape[1]], origin='upper')                
             ax.set_position([0, 0, 1, 1])
             plt.axis('off')
-            #plt.tight_layout()
             fig.savefig(plot_root + str(tidx).zfill(4) + '.png')
             plt.close('all')

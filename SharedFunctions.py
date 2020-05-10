@@ -213,14 +213,20 @@ def ConfigGet(config, sect, key, default=None, cast_type=None, verbose=1):
                         res[i] = cast_type(res[i])
                     
             return res
-        else:
-            if (cast_type is not None):
-                if (cast_type == float and res == 'nan'):
-                    return np.nan
-                else:
-                    return cast_type(res)
+        elif (cast_type is bool):
+            return config.getboolean(sect, key)
+        elif (cast_type is int):
+            return config.getint(sect, key)
+        elif (cast_type is float):
+            if (res == 'nan'):
+                return np.nan
             else:
+                return config.getfloat(sect, key)
+        else:
+            if (cast_type is None):
                 return res
+            else:
+                return cast_type(res)
     else:
         if (verbose>0):
             print('"' + key + '" not found in section "' + sect + '": default value ' + str(default) + ' returned.')
@@ -370,8 +376,14 @@ norm: it depends on norm_type:
 - norm_type=='3D' --> 3D Array with xyz-resolved normalization factors
 '''
 def downsample3d(inputArray, kernelSizeXY, kernelSizeZ, norm=None, norm_type='1D'):
+    # First round the z dimension of inputArray to an integer multiple of kernelSizeZ:
+    new_sizez = len(inputArray)//kernelSizeZ
+    inputArray = inputArray[:new_sizez*kernelSizeZ]
+    # Find the xy downsampled size 
     first_smaller = downsample2d(inputArray[0], kernelSizeXY)
-    smaller = np.zeros((len(inputArray)//kernelSizeZ, first_smaller.shape[1], first_smaller.shape[0]))
+    # initialize result
+    smaller = np.zeros((new_sizez, first_smaller.shape[1], first_smaller.shape[0]))
+    # number of frames averaged for each z (should be always kernelSizeZ)
     num_frames = np.zeros(smaller.shape[0])
     for i in range(0, len(inputArray), kernelSizeZ):
         smaller[i//kernelSizeZ] = np.zeros((first_smaller.shape[1], first_smaller.shape[0]))
