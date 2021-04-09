@@ -191,7 +191,7 @@ if __name__ == '__main__':
     
     if ('-skipaggregate' in cmd_list):
         
-        print('\nSkipping result aggregation')    
+        print('\nSkipping result aggregation')
 
     elif (SharedFunctions.CheckFolderExists(out_froot) == False):
         
@@ -301,13 +301,12 @@ if __name__ == '__main__':
             for cur_info in imgInfo:
                 cur_info['hdr_size'] = 0
             
+            laglist = SharedFunctions.ExtractIndexFromStrings(res_filenames[0], index_pos=0, index_notfound=0)
             res_files = []
             for fidx in range(len(res_filenames)):
                 res_files.append([])
                 for lidx in range(len(laglist)):
                     res_files[fidx].append(BinaryImgs.LoadMIfile(aggr_root + res_filenames[fidx][lidx], MI_info=imgInfo[fidx].copy(), returnHeader=False))
-            
-            laglist = SharedFunctions.ExtractIndexFromStrings(res_filenames[0], index_pos=0, index_notfound=0)
             
             fout_list = []
             lag_selidx_list = []
