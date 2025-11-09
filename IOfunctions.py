@@ -1,5 +1,6 @@
 import numpy as np
 import tifffile
+import cv2
 
 def get_stack_shape(fpath):
     with tifffile.TiffFile(fpath) as tif:
@@ -20,10 +21,11 @@ def compute_background(fpath, avg_range=None):
                 count += 1
     return res / count
         
-def get_single_frame(fpath, frame_n, cropROI=None, bkg=None, bkgcorr_offset=0, dtype=np.uint8):
-    return get_stack(fpath, frame_range=[frame_n, frame_n+1], cropROI=cropROI, bkg=bkg, bkgcorr_offset=bkgcorr_offset, dtype=np.uint8)[0]
+def get_single_frame(fpath, frame_n, cropROI=None, bkg=None, bkgcorr_offset=0, blur_sigma=0, blur_kernel=(0,0), dtype=np.uint8):
+    return get_stack(fpath, frame_range=[frame_n, frame_n+1], cropROI=cropROI, bkg=bkg, bkgcorr_offset=bkgcorr_offset, 
+                     blur_sigma=blur_sigma, blur_kernel=blur_kernel, dtype=dtype)[0]
 
-def get_stack(fpath, frame_range, cropROI=None, bkg=None, bkgcorr_offset=0, dtype=np.uint8):
+def get_stack(fpath, frame_range, cropROI=None, bkg=None, bkgcorr_offset=0, blur_sigma=0, blur_kernel=(0,0), dtype=np.uint8):
     res = None
     with tifffile.TiffFile(fpath) as tif:
         if frame_range is None:
@@ -42,5 +44,7 @@ def get_stack(fpath, frame_range, cropROI=None, bkg=None, bkgcorr_offset=0, dtyp
                 cur_frame = tif.pages[sel_frames[i]].asarray()
                 if bkg is not None:
                     cur_frame = cur_frame - bkg + bkgcorr_offset
+                if blur_sigma > 0:
+                    cv2.GaussianBlur(cur_frame, blur_kernel, blur_sigma)
                 res[i] = cur_frame[cropROI[1]:cropROI[3],cropROI[0]:cropROI[2]]
     return res
