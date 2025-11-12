@@ -8,6 +8,7 @@ from scipy.signal import argrelmax
 from scipy.optimize import curve_fit, least_squares
 from sklearn.cluster import DBSCAN
 from subpixel_edges import subpixel_edges
+from functools import partial
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -70,6 +71,24 @@ def track_droplets(img_stack, stack_offset, diameter, minmass, search_range, tra
     
     return track_df, PID_list
 
+def plot_trajectories(track_df, bkg_img, PID_list=None, chaxis_px=None, constr_pos=None, filter_range=None):
+    if PID_list is None:
+        PID_list = track_df['particle'].unique()
+    print('{0} particles have been tracked across the whole constriction'.format(len(PID_list)))
+    fig, ax = plt.subplots(nrows=2)
+    tp.plot_traj(track_df, superimpose=bkg_img, ax=ax[0], plot_style={'linewidth': 2})
+    for pID in PID_list:
+        ax[1].plot(track_df[(track_df['particle']==pID)]['x'], track_df[(track_df['particle']==pID)]['y'])
+    if chaxis_px is not None:
+        ax[1].axhline(chaxis_px, color='k', ls='--')
+    if constr_pos is not None:
+        for cur_pos in constr_pos:
+            ax[1].axvline(cur_pos, color='k', ls=':')
+        if chaxis_px is not None and filter_range is not None:
+            ax[0].add_patch(patches.Rectangle((constr_pos[0]-filter_range[0], chaxis_px-filter_range[1]), 
+                                      constr_pos[1]-constr_pos[0]+2*filter_range[0], 2*filter_range[1], edgecolor='y', facecolor='none'))
+
+            
 def calc_droplet_stress(x_px, px_size, fps, eta, verbose=0, params=None, plot=False):
     x_pos = np.array(px_size * x_px)
     v = np.gradient(x_pos, 1./fps) #um/s
@@ -115,9 +134,11 @@ def track_postproc(track_df, px_size, fps, eta, ss_maxtomean=None, save_fname=No
         str_hdr = ''        
     PID_list = track_df['particle'].unique()
     PID_sel = []
+    max_dx, max_dy = [], []
     count_excluded = 0
     for cur_PID in PID_list:
-        x_pos, v, stress = calc_droplet_stress(track_df[(track_df['particle'] == cur_PID)]['x'], px_size=px_size, fps=fps, eta=eta, verbose=verbose, params=params)
+        cur_xarr = track_df[(track_df['particle'] == cur_PID)]['x']
+        x_pos, v, stress = calc_droplet_stress(cur_xarr, px_size=px_size, fps=fps, eta=eta, verbose=verbose, params=params)
         if update_df:
             track_df.loc[(track_df['particle'] == cur_PID), 'vx'] = v
             track_df.loc[(track_df['particle'] == cur_PID), 'stress'] = stress
@@ -126,6 +147,8 @@ def track_postproc(track_df, px_size, fps, eta, ss_maxtomean=None, save_fname=No
         else:
             drop_ok = True
         if drop_ok:
+            max_dx.append(np.max(np.diff(cur_xarr)))
+            max_dy.append(np.max(np.diff(track_df[(track_df['particle'] == cur_PID)]['y'])))
             PID_sel.append(cur_PID)
             x_pos *= 1e6
             v *= 1e6
@@ -155,6 +178,7 @@ def track_postproc(track_df, px_size, fps, eta, ss_maxtomean=None, save_fname=No
         np.savetxt(os.path.join(froot, img_name+'_stress.dat'), np.array(res_data).T, delimiter='\t', header=str_hdr)
     if count_excluded>0:
         print('{0}/{1} droplets excluded from the analysis'.format(count_excluded, len(PID_list)))
+    print('Max displacement between adjacent frames: [{0:.1f}, {1:.1f}] pixels'.format(np.max(max_dx), np.max(max_dy)))
     return PID_sel
 
 def drop_cropROI(track_df, pID, frame, roi_size, rel_frame=False, fpath=None, bkg=None, bkgcorr_offset=0, blur_sigma=0):
@@ -232,46 +256,101 @@ def extract_outer_edge(edge_points, eps, min_samples):
         outermost_points = edge_points[y_pred == outermost_label]
         return outermost_points, y_pred
 
-def poly_fit_theta(theta, c1, c2, c3, c4, c5):
-    return 1 + c1*np.cos(theta) + c2*np.cos(2*theta) + c3*np.cos(3*theta) + c4*np.cos(4*theta) + c5*np.cos(5*theta)
+def r_theta_circle(theta, r0, x0, y0):
+    return r0 * (1 - x0*np.cos(theta) - y0*np.sin(theta))
 
-def fit_edge(drop_edges, filter_r_thr=100, logfile=None, frame_n=None, plot=True, plot_savedir=None): # the edges are before rotation
+def r_theta_ellipse(theta, r0, x0, y0, gamma):
+    return r0 * (1 - x0*np.cos(theta) - y0*np.sin(theta) + gamma*np.cos(2*theta))
 
-    raw_x, raw_y = drop_edges[:,0], drop_edges[:,1]
-    
-    #filter out r and theta value where r greater than r_bar, only fit inner circle
-    raw_r = np.sqrt((raw_x - np.mean(raw_x))**2 + (raw_y - np.mean(raw_y))**2)
-    filt_idx = np.where(raw_r <= np.mean(raw_r) + filter_r_thr)
-    x = raw_x[filt_idx]
-    y = raw_y[filt_idx]
+def r_theta_higherorder(theta, r0, x0, y0, g2, g3, g4, g5):
+    return r0 * (1 - x0*np.cos(theta) - y0*np.sin(theta) + g2*np.cos(2*theta) + g3*np.cos(3*theta) + g4*np.cos(4*theta) + g5*np.cos(5*theta))
 
-    # renew centers
+def calc_r2(y, yfit):
+    return 1 - np.sum(np.square(y-yfit))/np.sum(np.square(y-np.mean(y)))
+
+def calc_Pearson(covar):
+    return np.sqrt(covar[1][0]*covar[0][1]/(covar[0][0]*covar[1][1]))
+
+def fit_edge(drop_edges, guess_bound=0.1, filter_r_thr=None, frame_n=None, print_res=False, plot=True, plot_savedir=None): # the edges are before rotation
+
+    x, y = drop_edges[:,0], drop_edges[:,1]
     cx, cy = np.mean(x), np.mean(y)
-    xcorr, ycorr = x - cx, y - cy
-    r, theta = np.sqrt(xcorr**2 + ycorr**2), np.arctan2(ycorr, xcorr)
-
-    # calculate r_bar, which is the mean radius
-    r_bar = np.mean(r)
-    r_norm = r / r_bar    
-    if logfile is not None:
-        with open(os.path.join(dir, 'output.txt'), 'a') as file:
-            file.write(f'Frame {frame_n}: r_bar = {r_bar}\n')
-
-    popt, pcov = curve_fit(poly_fit_theta, theta, r_norm, p0=[0,0.1,0,0,0])
-    # now popt contains the Fourier coefficients of the droplet deformation
-
-    r_mserr = np.mean(np.square(r - r_bar * poly_fit_theta(theta, *popt)))
+    r = np.sqrt((x - cx)**2 + (y - cy)**2)
+    
+    if filter_r_thr is None:
+        #filter out r and theta value where r much greater than r_bar, only fit inner circle
+        filt_idx = np.where(r <= np.mean(r) + filter_r_thr)
+        x = x[filt_idx]
+        y = y[filt_idx]
+        # renew centers
+        cx, cy = np.mean(x), np.mean(y)
+        r = np.sqrt((x - cx)**2 + (y - cy)**2)
+    
+    theta = np.arctan2(y - cy, x - cx)
+    dx, dy = np.max(x)-np.min(x), np.max(y)-np.min(y)
+    guess_rbar = np.mean(r)
+    guess_g2 = (dx - dy)/(dx + dy)
+    
+    popt_crc, pcov_crc = curve_fit(r_theta_circle, theta, r, p0=[guess_rbar,0,0])
+    guess_rbar, guess_xc, guess_yc = popt_crc[0], popt_crc[1], popt_crc[2]
+    partial_ellipse_fitfunc = partial(r_theta_ellipse, r0=guess_rbar, x0=guess_xc, y0=guess_yc)
+    popt_ell, pcov_ell = curve_fit(lambda theta, gamma: r_theta_ellipse(theta, *popt_crc, gamma), theta, r, p0=[guess_g2])
+    guessp = [guess_rbar, guess_xc, guess_yc, popt_ell[0], 0, 0, 0]
+    if guess_bound is not None:
+        pbounds = ([guess_rbar*(1-guess_bound), guess_xc-1, guess_yc-1, 
+                    popt_ell[0]-guess_bound, -guess_bound, -guess_bound, -guess_bound],
+                   [guess_rbar*(1+guess_bound), guess_xc+1, guess_yc+1, 
+                    popt_ell[0]+guess_bound, guess_bound, guess_bound, guess_bound])
+        method = 'trf'
+    else:
+        pbounds = (-np.inf, np.inf)
+        method = 'lm'
+        
+    popt, pcov = curve_fit(r_theta_higherorder, theta, r, method=method, p0=guessp, bounds=pbounds)
+    perr = np.sqrt(np.diag(pcov))
+    r_fit = r_theta_higherorder(theta, *popt)
+    r_mserr = np.mean(np.square(r - r_fit))
+    non_ellip = np.sum(np.abs(popt[4:]))/np.abs(popt[3])
+    
+    res = {'cx'    : cx,
+           'cy'    : cy,
+           'dx'    : dx,
+           'dy'    : dy,
+           'rbar'  : popt[0],
+           'rb_er' : perr[0],
+           'x0'    : popt[1],
+           'x0_er' : perr[1],
+           'y0'    : popt[2],
+           'y0_er' : perr[2],
+           'g2'    : popt[3],
+           'g2_er' : perr[3],
+           'g3'    : popt[4],
+           'g3_er' : perr[4],
+           'g4'    : popt[5],
+           'g4_er' : perr[5],
+           'g5'    : popt[6],
+           'g5_er' : perr[6],
+           'R2'    : calc_r2(r, r_fit),
+           'mserr' : r_mserr,
+           'rmean' : np.mean(r),
+           'rawg2' : guess_g2,
+           'r0_el' : guess_rbar,
+           'x0_el' : guess_xc,
+           'y0_el' : guess_yc,
+           'g2_el' : popt_ell[0],
+           'nonel' : non_ellip,
+          }
     
     if plot:
         # Plot the reconstructed droplet shape
         theta_fit = np.linspace(-np.pi, np.pi, 1000)
-        r_fit = r_bar * poly_fit_theta(theta_fit, *popt)
-        r_ellipse = r_bar * poly_fit_theta(theta_fit, popt[0], popt[1], 0, 0, 0)
-        non_ellip = np.sum(np.abs(popt[2:]))/np.abs(popt[1])
+        r_fit = r_theta_higherorder(theta_fit, *popt)
+        r_crc = r_theta_circle(theta_fit, *popt_crc)
+        r_ellipse = r_theta_ellipse(theta_fit, *popt_crc, *popt_ell)
         fig, ax = plt.subplots(figsize=(6, 6))
-        ax.plot(raw_x - np.mean(raw_x), raw_y - np.mean(raw_y), 'k.', label='Data')
-        ax.plot(r_bar * np.cos(theta_fit), r_bar * np.sin(theta_fit), 'b:', label=r'Circle ($\bar r=$' + '{0:.1f}px)'.format(r_bar))
-        ax.plot(r_ellipse * np.cos(theta_fit), r_ellipse * np.sin(theta_fit), 'g-', label=r'Ellipse ($\gamma_2=$' + '{0:.1f}%)'.format(popt[1]*100))
+        ax.plot(x - cx, y - cy, 'k.', label='Data')
+        ax.plot(r_crc * np.cos(theta_fit), r_crc * np.sin(theta_fit), 'b:', label=r'Circle ($\bar r=$' + '{0:.1f}px)'.format(guess_rbar))
+        ax.plot(r_ellipse * np.cos(theta_fit), r_ellipse * np.sin(theta_fit), 'g-', label=r'Ellipse ($\gamma_2=$' + '{0:.1f}%)'.format(popt_ell[0]*100))
         ax.plot(r_fit * np.cos(theta_fit), r_fit * np.sin(theta_fit), 'r--', lw=2, label=r'Fit ($\Sigma\gamma_{n>2}/\gamma_2=$' + '{0:.2f})'.format(non_ellip))
         ax.set_aspect('equal')
         ax.yaxis.set_major_locator(ax.xaxis.get_major_locator())
@@ -280,7 +359,28 @@ def fit_edge(drop_edges, filter_r_thr=100, logfile=None, frame_n=None, plot=True
         if plot_savedir is not None:
             fig.savefig(os.path.join(plot_savedir, f'fit_{frame_n}.png'))
 
-    return popt, [cx, cy], r_bar, r_mserr
+    if print_res:
+        strout = ''
+        strout += '\n----------+------+-------+-------+-------+-------'
+        strout += '\nParameter | unit |  raw  | guess | value | err'
+        strout += '\n----------+------+-------+-------+-------+-------'
+        strout += '\n    x0    |  px  |{0:6.2f} |{1:6.2f} |{2:6.2f} | {3:4.3f}'.format(0, res['x0_el'], res['x0'], res['x0_er'])
+        strout += '\n    y0    |  px  |{0:6.2f} |{1:6.2f} |{2:6.2f} | {3:4.3f}'.format(0, res['y0_el'], res['y0'], res['y0_er'])
+        strout += '\n   rbar   |  px  |{0:6.2f} |{1:6.2f} |{2:6.2f} | {3:4.3f}'.format(res['rmean'], res['r0_el'], res['rbar'], res['rb_er'])
+        strout += '\n  gamma_2 |  %   |{0:6.2f} |{1:6.2f} |{2:6.2f} | {3:4.3f}'.format(res['rawg2']*100, res['g2_el']*100, res['g2']*100, res['g2_er']*100)
+        strout += '\n  gamma_3 |  %   |{0:6.2f} |{1:6.2f} |{2:6.2f} | {3:4.3f}'.format(0, 0, res['g3']*100, res['g3_er']*100)
+        strout += '\n  gamma_4 |  %   |{0:6.2f} |{1:6.2f} |{2:6.2f} | {3:4.3f}'.format(0, 0, res['g4']*100, res['g4_er']*100)
+        strout += '\n  gamma_5 |  %   |{0:6.2f} |{1:6.2f} |{2:6.2f} | {3:4.3f}'.format(0, 0, res['g5']*100, res['g5_er']*100)
+        strout += '\n----------+------+-------+-------+-------+-------'
+        strout += '\n\nFine-tuned center: ({0:.3f},{1:.3f}). Guess from circle fit: ({3:.3f},{3:.3f})'.format(res['x0'], res['y0'], res['x0_el'], res['y0_el'])
+        strout += '\nDroplet radius: guess={0:.2f} px, circle fit={1:.2f} px, Final fit={2:.2f} px'.format(res['rmean'], res['r0_el'], res['rbar'])
+        strout += '\nElliptical deformation: guess={0:.2f}%, elliptical fit={1:.2f}%, Final fit={2:.2f}%'.format(res['rawg2']*100, res['g2_el']*100, res['g2']*100)
+        strout += '\nHigher-order deformation coefficients: g3={0:.2f}%, g4={1:.2f}%, g4={2:.2f}%'.format(res['g3']*100, res['g4']*100, res['g5']*100)
+        strout += '\nNon-elliptical deformation parameter: {0:.3f}'.format(res['nonel'])
+        strout += '\nRMS fit error: {0:.2f} px, fit R2: {1:.3f}'.format(res['mserr'], res['R2'])
+        print(strout)
+            
+    return res
 
 def analyze_deformations(img_path, track_df, crop_roi_size, img_bkg=None, img_bkgcorr_offset=0, img_blur_sigma=0, 
                          edge_threshold=5.5, smoothing_iterN=4, dbscan_eps=1, dbscan_minN=1, filter_r_thr=100, 
@@ -290,9 +390,6 @@ def analyze_deformations(img_path, track_df, crop_roi_size, img_bkg=None, img_bk
     res_list, PID_sel = [], []
     if PID_list is None:
         PID_list = track_df['particle'].unique()
-    
-    for newcol in ['rbar', 'gamma1', 'gamma2', 'gamma3', 'gamma4', 'gamma5', 'xfit', 'yfit', 'fit_mserr']:
-        track_df[newcol] = np.nan
 
     count_skipped = 0
     t0 = time.time()
@@ -303,9 +400,10 @@ def analyze_deformations(img_path, track_df, crop_roi_size, img_bkg=None, img_bk
         particle_failed = False
 
         # Temporary lists for the current particle's data
-        cur_res = np.empty((len(track_df[track_df['particle'] == pID]), 7), dtype=float)
+        cur_res = []
 
         # Create directories for saving plots
+        cur_outdir = None
         if plot_outdir is not None:
             cur_outdir = os.path.join(plot_outdir, str(pID))
             os.makedirs(cur_outdir, exist_ok=True)
@@ -334,19 +432,10 @@ def analyze_deformations(img_path, track_df, crop_roi_size, img_bkg=None, img_bk
                 break  # Exit the inner loop (over frames) immediately
 
             # Continue with calculations if frame analysis was successful
-            popt, ctrpos, rbar, mserr = fit_edge(drop_edges, filter_r_thr=filter_r_thr, logfile=None, frame_n=framenum, plot=True, plot_savedir=cur_outdir)
-            cur_res[count] = (rbar, *popt, mserr)
-
-            # Update particle coordinates in the original DataFrame
-            track_df.loc[(track_df['particle'] == pID) & (track_df['frame'] == framenum), 'xfit'] = xloc + ctrpos[0] - crop_roi_size 
-            track_df.loc[(track_df['particle'] == pID) & (track_df['frame'] == framenum), 'yfit'] = yloc + ctrpos[1] - crop_roi_size
-            track_df.loc[(track_df['particle'] == pID) & (track_df['frame'] == framenum), 'rbar'] = rbar
-            track_df.loc[(track_df['particle'] == pID) & (track_df['frame'] == framenum), 'gamma1'] = popt[0]
-            track_df.loc[(track_df['particle'] == pID) & (track_df['frame'] == framenum), 'gamma2'] = popt[1]
-            track_df.loc[(track_df['particle'] == pID) & (track_df['frame'] == framenum), 'gamma3'] = popt[2]
-            track_df.loc[(track_df['particle'] == pID) & (track_df['frame'] == framenum), 'gamma4'] = popt[3]
-            track_df.loc[(track_df['particle'] == pID) & (track_df['frame'] == framenum), 'gamma5'] = popt[4]
-            track_df.loc[(track_df['particle'] == pID) & (track_df['frame'] == framenum), 'fit_mserr'] = mserr
+            fitres = fit_edge(drop_edges, filter_r_thr=filter_r_thr, frame_n=framenum, plot=True, plot_savedir=cur_outdir)
+            cur_res.append(fitres)
+            for key in fitres:
+                track_df.loc[(track_df['particle'] == pID) & (track_df['frame'] == framenum), 'fit_'+key] = fitres[key]
 
             count += 1
             plt.close('all')
@@ -356,12 +445,13 @@ def analyze_deformations(img_path, track_df, crop_roi_size, img_bkg=None, img_bk
         if particle_failed:
             count_skipped += 1
             # Optional: Clean up the directory created for the failed particle
-            try:
-                shutil.rmtree(cur_outdir)
-                print(f"Removed directory for failed particle {pID}.")
-            except OSError as e:
-                print(f"Error removing directory {cur_outdir}: {e.strerror}")
-            continue # Skip to the next particle
+            if cur_outdir is not None:
+                try:
+                    shutil.rmtree(cur_outdir)
+                    print(f"Removed directory for failed particle {pID}.")
+                except OSError as e:
+                    print(f"Error removing directory {cur_outdir}: {e.strerror}")
+                continue # Skip to the next particle
         else:
             # If the particle was processed successfully, append its results to the final lists
             res_list.append(cur_res)
@@ -381,7 +471,7 @@ def filter_droplets(track_df, thr_relstd, thr_mserr, PID_list=None):
     fig, ax = plt.subplots(nrows=2, figsize=(8,8))
     for pID in PID_list:
         cur_subdf = track_df[(track_df['particle'] == pID)]
-        if np.std(cur_subdf['rbar'])/np.mean(cur_subdf['rbar']) > thr_relstd or np.max(cur_subdf['fit_mserr'] > thr_mserr):
+        if np.std(cur_subdf['fit_rbar'])/np.mean(cur_subdf['fit_rbar']) > thr_relstd or np.max(cur_subdf['fit_mserr'] > thr_mserr):
             fmt = ':'
             lw=1
             pID_excl.append(int(pID))
@@ -389,7 +479,7 @@ def filter_droplets(track_df, thr_relstd, thr_mserr, PID_list=None):
             fmt = '.-'
             lw=2
             pID_subset.append(int(pID))
-        ax[0].plot(cur_subdf['x'], cur_subdf['rbar'], fmt, lw=lw, alpha=0.5, label=str(pID))
+        ax[0].plot(cur_subdf['x'], cur_subdf['fit_rbar'], fmt, lw=lw, alpha=0.5, label=str(pID))
         ax[1].plot(cur_subdf['x'], cur_subdf['fit_mserr'], fmt, lw=lw, alpha=0.5, label=str(pID))
     ax[0].legend(ncol=10, prop={'size': 6})
     ax[1].set_yscale('log')
@@ -413,8 +503,8 @@ def plot_lissajous(track_df, pID_subset=None, recalc_stress=False, px_size=1, fp
     for pID in pID_subset:
         cur_subdf = track_df[(track_df['particle'] == pID)]
         ax[0,0].plot(cur_subdf['x'], cur_subdf['stress'], 'o', alpha=plot_alpha, label=str(pID))
-        ax[1,1].plot(cur_subdf['gamma2'], cur_subdf['x'], 'o', alpha=plot_alpha)
-        ax[0,1].plot(cur_subdf['gamma2'], cur_subdf['stress'], 'o', alpha=plot_alpha)
+        ax[1,1].plot(cur_subdf['fit_g2'], cur_subdf['x'], 'o', alpha=plot_alpha)
+        ax[0,1].plot(cur_subdf['fit_g2'], cur_subdf['stress'], 'o', alpha=plot_alpha)
     ax[1,0].set_visible(False)
     ax[0,1].xaxis.set_visible(False)
     ax[0,1].yaxis.set_visible(False)
@@ -467,8 +557,12 @@ def oscill_shared_omega(t_data, fit_params):
         result = result[0]
     return result
 
+# Define the oscillation function with a shared omega
+def oscill_shared_omega_2(t_data, A1, phi1, yoff1, A2, phi2, yoff2, omega):
+    return oscill_shared_omega(t_data, [A1, phi1, yoff1, A2, phi2, yoff2, omega])
+
 # Function to fit multiple datasets
-def fit_oscill_shareomega(t, gamma, sigma, fit_margin=0, plot=False):
+def fit_oscill_shareomega(t, gamma, sigma, fit_margin=0, pre_fit_iter=2, param_bound=0, plot=False):
 
     fitidx = slice(fit_margin, len(t)-fit_margin)
     fitt = t[fitidx]
@@ -477,18 +571,33 @@ def fit_oscill_shareomega(t, gamma, sigma, fit_margin=0, plot=False):
     gamma_fitp, _ = fit_oscill(fitt, gamma[fitidx])
     sigma_fitp, _ = fit_oscill(fitt, sigma[fitidx])
     initial_guess = [*gamma_fitp[1:], *sigma_fitp[1:], 0.5*(gamma_fitp[0]+sigma_fitp[0])]
-    rel_bound = 0.1
-    param_bounds = ([x*(1-rel_bound) for x in initial_guess], [x*(1+rel_bound) for x in initial_guess])
-    param_bounds[0][-1] = min(gamma_fitp[0], sigma_fitp[0])*(1-rel_bound)
-    param_bounds[1][-1] = max(gamma_fitp[0], sigma_fitp[0])*(1+rel_bound)
-
-    # Flatten the x_data for fitting
     y_data_flat = np.concatenate([gamma[fitidx], sigma[fitidx]])
+    for i in range(pre_fit_iter):
+        par_w, covariance = curve_fit(lambda fitt, omega, phi1, phi2: oscill_shared_omega_2(fitt, initial_guess[0], phi1, initial_guess[2],
+                                                                                           initial_guess[3], phi2, initial_guess[5], omega), 
+                                       fitt, y_data_flat, p0=[initial_guess[-1], initial_guess[1], initial_guess[4]], method='lm')
+        initial_guess = [initial_guess[0], par_w[1], initial_guess[2], initial_guess[3], par_w[2], initial_guess[5], par_w[0]]
+        par_A, covariance = curve_fit(lambda fitt, A1, yoff1, A2, yoff2: oscill_shared_omega_2(fitt, A1, initial_guess[1], yoff1,
+                                                                                           A2, initial_guess[4], yoff2, initial_guess[6]), 
+                                       fitt, y_data_flat, p0=[initial_guess[0], initial_guess[2], initial_guess[3], initial_guess[5]], method='lm')
+        initial_guess = [par_A[0], initial_guess[1], par_A[1], par_A[2], initial_guess[4], par_A[3], initial_guess[6]]
 
-    # Curve fitting
-    params, covariance = curve_fit(lambda *p: oscill_shared_omega(fitt, p), 
-                                   fitt, y_data_flat, p0=initial_guess, method='trf', 
-                                   bounds=param_bounds)
+    if param_bound is None:
+        params, covariance = curve_fit(lambda *p: oscill_shared_omega(fitt, p), 
+                                       fitt, y_data_flat, p0=initial_guess, method='lm')
+    else:
+        if param_bound==0:
+            params, covariance = initial_guess, None
+        else:
+            param_bounds = ([x*(1-param_bound) for x in initial_guess], [x*(1+param_bound) for x in initial_guess])
+            param_bounds[0][-1] = min(gamma_fitp[0], sigma_fitp[0])*(1-param_bound)
+            param_bounds[1][-1] = max(gamma_fitp[0], sigma_fitp[0])*(1+param_bound)
+            try:
+                params, covariance = curve_fit(lambda *p: oscill_shared_omega(fitt, p), 
+                                               fitt, y_data_flat, p0=initial_guess, method='trf',
+                                               bounds=param_bounds)
+            except RuntimeError:
+                params, covariance = initial_guess, None
 
     # Extract fitted parameters
     guessp = {
@@ -539,7 +648,7 @@ def fit_oscill_shareomega(t, gamma, sigma, fit_margin=0, plot=False):
 
     return fitp, covariance, guessp
 
-def calculate_modulus(gamma, sigma, fps=1, fit_margin=0, plot=False):
+def calculate_modulus(gamma, sigma, fps=1, fit_margin=0, param_bound=0, pre_fit_iter=2, plot=False):
 
     t = np.arange(0, len(gamma)) / fps
     non_nan_indices = np.logical_and(~np.isnan(gamma), ~np.isnan(sigma))
@@ -548,7 +657,7 @@ def calculate_modulus(gamma, sigma, fps=1, fit_margin=0, plot=False):
     sigma = np.array(sigma)[non_nan_indices]
     
 
-    fitp, covar, guessp = fit_oscill_shareomega(t, gamma, sigma, fit_margin=fit_margin, plot=plot)
+    fitp, covar, guessp = fit_oscill_shareomega(t, gamma, sigma, fit_margin=fit_margin, param_bound=param_bound, pre_fit_iter=pre_fit_iter, plot=plot)
     
     Gstar = fitp['A'][1] / fitp['A'][0]
     phase_diff = fitp['phi'][1] - fitp['phi'][0]
@@ -562,22 +671,23 @@ def calculate_modulus(gamma, sigma, fps=1, fit_margin=0, plot=False):
         'strain_amp' : fitp['A'][0],
         'stress_amp' : fitp['A'][1],
         'omega' : fitp['omega'],
-        'r2' : covar[0][1]*covar[1][0]/(covar[0][0]*covar[1][1]),
-        'npts' : len(t)-2*fit_margin
+        'npts' : len(t)-2*fit_margin,
     }
 
     return res
 
-def calc_moduli(track_df, PID_list=None, fps=1, fit_margin=0, plot=True, save_csv=None):
+def calc_moduli(track_df, PID_list=None, fps=1, fit_margin=0, param_bound=0, pre_fit_iter=2, plot=True, save_csv=None):
     
     res = []
     if PID_list is None:
         PID_list = track_df['particle'].unique()
     for pID in PID_list:
-        cur_res = calculate_modulus(gamma=track_df[(track_df['particle'] == pID)]['gamma2'],
-                                    sigma=track_df[(track_df['particle'] == pID)]['stress'], fps=fps, fit_margin=fit_margin, plot=False)
-        cur_res['rbar'] = np.nanmean(track_df[(track_df['particle'] == pID)]['rbar'])
-        cur_res['v_avg'] = np.nanmean(track_df[(track_df['particle'] == pID)]['vx'])
+        cur_df = track_df[(track_df['particle'] == pID)]
+        cur_res = calculate_modulus(gamma=cur_df['fit_g2'], sigma=cur_df['stress'], 
+                                    fps=fps, fit_margin=fit_margin, param_bound=param_bound, pre_fit_iter=pre_fit_iter, plot=False)
+        cur_res['rbar'] = np.nanmean(cur_df['fit_rbar'])
+        cur_res['v_avg'] = np.nanmean(cur_df['vx'])
+        cur_res['yavg'] = np.nanmean(cur_df['y'])
         res.append(cur_res)
     res_df = pd.DataFrame(res)
 
@@ -593,7 +703,7 @@ def calc_moduli(track_df, PID_list=None, fps=1, fit_margin=0, plot=True, save_cs
         print('storage modulus: {0:.1f} +/- {1:.1f} Pa'.format(Gp_avg, Gp_std))
         print('loss modulus   : {0:.1f} +/- {1:.1f} Pa'.format(Gs_avg, Gs_std))
 
-        fig, ax = plt.subplots(nrows=6, ncols=2, figsize=(5,10))
+        fig, ax = plt.subplots(nrows=6, ncols=3, figsize=(7,12))
         ax[0,0].plot(res_df['rbar'], res_df['strain_amp'], '^', c='tab:orange', label=r'$\bar\gamma$')
         ax[0,0].plot(res_df['rbar'], res_df['strain_off'], 'v', c='tab:purple', label=r'$\gamma_{off}$')
         ax[0,0].plot(res_df['rbar'], [np.mean(res_df['strain_amp'])]*len(res_df), ':', c='tab:orange')
@@ -602,6 +712,10 @@ def calc_moduli(track_df, PID_list=None, fps=1, fit_margin=0, plot=True, save_cs
         ax[0,1].plot(res_df['omega'], res_df['strain_off'], 'v', c='tab:purple')
         ax[0,1].plot(res_df['omega'], [np.mean(res_df['strain_amp'])]*len(res_df), ':', c='tab:orange')
         ax[0,1].plot(res_df['omega'], [np.mean(res_df['strain_off'])]*len(res_df), ':', c='tab:purple')
+        ax[0,2].plot(res_df['yavg'], res_df['strain_amp'], '^', c='tab:orange')
+        ax[0,2].plot(res_df['yavg'], res_df['strain_off'], 'v', c='tab:purple')
+        ax[0,2].plot(res_df['yavg'], [np.mean(res_df['strain_amp'])]*len(res_df), ':', c='tab:orange')
+        ax[0,2].plot(res_df['yavg'], [np.mean(res_df['strain_off'])]*len(res_df), ':', c='tab:purple')
         ax[1,0].plot(res_df['rbar'], res_df['stress_amp'], '>', c='tab:gray', label=r'$\bar\sigma$')
         #ax[1,0].plot(res_df['rbar'], res_df['stress_off'], '<', c='tab:olive', label=r'$\sigma_{off}$')
         ax[1,0].plot(res_df['rbar'], [np.mean(res_df['stress_amp'])]*len(res_df), ':', c='tab:gray')
@@ -610,10 +724,14 @@ def calc_moduli(track_df, PID_list=None, fps=1, fit_margin=0, plot=True, save_cs
         #ax[1,1].plot(res_df['omega'], res_df['stress_off'], '<', c='tab:olive')
         ax[1,1].plot(res_df['omega'], [np.mean(res_df['stress_amp'])]*len(res_df), ':', c='tab:gray')
         #ax[1,1].plot(res_df['omega'], [np.mean(res_df['stress_off'])]*len(res_df), ':', c='tab:olive')
+        ax[1,2].plot(res_df['yavg'], res_df['stress_amp'], '>', c='tab:gray')
+        ax[1,2].plot(res_df['yavg'], [np.mean(res_df['stress_amp'])]*len(res_df), ':', c='tab:gray')
         ax[2,0].plot(res_df['rbar'], res_df['v_avg'], '*', c='tab:brown', label=r'$\langle v\rangle$')
         ax[2,0].plot(res_df['rbar'], [np.mean(res_df['v_avg'])]*len(res_df), ':', c='tab:brown')
         ax[2,1].plot(res_df['omega'], res_df['v_avg'], '*', c='tab:brown')
         ax[2,1].plot(res_df['omega'], [np.mean(res_df['v_avg'])]*len(res_df), ':', c='tab:brown')
+        ax[2,2].plot(res_df['yavg'], res_df['v_avg'], '*', c='tab:brown')
+        ax[2,2].plot(res_df['yavg'], [np.mean(res_df['v_avg'])]*len(res_df), ':', c='tab:brown')
         ax[3,0].plot(res_df['rbar'], res_df['Gp'], 'bo', label=r'$G^\prime$')
         ax[3,0].plot(res_df['rbar'], res_df['Gs'], 'gs', label=r'$G^{\prime\prime}$')
         ax[3,0].plot(res_df['rbar'], [Gp_avg]*len(res_df), 'b:')
@@ -626,6 +744,12 @@ def calc_moduli(track_df, PID_list=None, fps=1, fit_margin=0, plot=True, save_cs
         ax[3,1].plot(res_df['omega'], [Gs_avg]*len(res_df), 'g:')
         ax[3,1].fill_between([np.min(res_df['omega']), np.max(res_df['omega'])], [Gp_avg-Gp_std]*2, [Gp_avg+Gp_std]*2, color='b', alpha=0.3)
         ax[3,1].fill_between([np.min(res_df['omega']), np.max(res_df['omega'])], [Gs_avg-Gs_std]*2, [Gs_avg+Gs_std]*2, color='g', alpha=0.3)
+        ax[3,2].plot(res_df['yavg'], res_df['Gp'], 'bo')
+        ax[3,2].plot(res_df['yavg'], res_df['Gs'], 'gs')
+        ax[3,2].plot(res_df['yavg'], [Gp_avg]*len(res_df), 'b:')
+        ax[3,2].plot(res_df['yavg'], [Gs_avg]*len(res_df), 'g:')
+        ax[3,2].fill_between([np.min(res_df['yavg']), np.max(res_df['yavg'])], [Gp_avg-Gp_std]*2, [Gp_avg+Gp_std]*2, color='b', alpha=0.3)
+        ax[3,2].fill_between([np.min(res_df['yavg']), np.max(res_df['yavg'])], [Gs_avg-Gs_std]*2, [Gs_avg+Gs_std]*2, color='g', alpha=0.3)
         ax[0,0].set_ylabel(r'$\bar\gamma$, $\gamma_{off}$ [-]')
         ax[1,0].set_ylabel(r'$\bar\sigma$ [Pa]')
         ax[2,0].set_ylabel(r'$\langle v \rangle$ [m/s]')
@@ -634,8 +758,11 @@ def calc_moduli(track_df, PID_list=None, fps=1, fit_margin=0, plot=True, save_cs
         ax[4,0].axvline(r_avg, color='k', ls=':')
         ax[4,1].hist(res_df['omega'], color='m')
         ax[4,1].axvline(f_avg, color='k', ls=':')
+        ax[4,2].hist(res_df['yavg'], color='y')
+        ax[4,2].axvline(np.mean(res_df['yavg']), color='k', ls=':')
         ax[4,0].set_xlabel(r'$\bar r$ [px]')
         ax[4,1].set_xlabel(r'$\omega$ [rad/s]')
+        ax[4,2].set_xlabel(r'$\langle y \rangle$ [px]')
         ax[4,0].set_ylabel(r'PDF')
         ax[5,0].hist(res_df['Gp'], color='b')
         ax[5,0].axvline(Gp_avg, color='k', ls=':')
@@ -645,9 +772,10 @@ def calc_moduli(track_df, PID_list=None, fps=1, fit_margin=0, plot=True, save_cs
         ax[5,0].set_ylabel(r'PDF')
         ax[5,0].set_xlabel(r'$G^\prime$ [Pa]')
         ax[5,1].set_xlabel(r'$G^{\prime\prime}$ [Pa]')
+        ax[5,2].set_visible(False)
         for cax in ax[:4,0]:
             cax.legend()
-        for cax in ax[:,1]:
+        for cax in [*ax[:,1], *ax[:,2]]:
             cax.yaxis.set_visible(False)
         fig.tight_layout()
         
