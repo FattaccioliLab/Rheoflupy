@@ -198,7 +198,11 @@ def track_postproc(track_df, px_size, fps, eta, ss_maxtomean=None, save_fname=No
 
 def drop_cropROI(track_df, pID, frame, roi_size, rel_frame=False, fpath=None, bkg=None, bkgcorr_offset=0, blur_sigma=0):
     if rel_frame:
-        drop_frame = int(track_df[(track_df['particle']==pID)]['frame'].iloc[[frame]])
+        if len(track_df[(track_df['particle']==pID)]['frame']) > frame:
+            drop_frame = int(track_df[(track_df['particle']==pID)]['frame'].iloc[[frame]])
+        else:
+            print('WARNING: in drop_cropROI() function, particle {0} was detected on {1} frames only: {2}-th frame unavailable'.format(pID, len(track_df[(track_df['particle']==pID)]['frame']), frame))
+            return None, None
     else:
         drop_frame = frame
     roi = track_df[(track_df['particle']==pID) & (track_df['frame'] == drop_frame)]
@@ -211,13 +215,16 @@ def drop_cropROI(track_df, pID, frame, roi_size, rel_frame=False, fpath=None, bk
     return drop_ROI, imgcrop
         
 def find_edges(image, edge_threshold, smoothing_iterN, dbscan_eps=1, dbscan_minN=1, plot=False):
+    if image is None:
+        print('WARNING: in function find_edges(), input image was None. None returned')
+        return None
     drop_edges = subpixel_edges(image, edge_threshold, smoothing_iterN, 2)
     edge_points = np.array([drop_edges.x,drop_edges.y]).T
     out_edge, cluster_labels = extract_outer_edge(edge_points, dbscan_eps, dbscan_minN)
     if plot:
         fig, ax = plt.subplots()
         ax.imshow(image, cmap='Greys_r', extent=[0, image.shape[1], 0, image.shape[0]], origin='lower', aspect='auto')
-        ax.imshow(np.ones_like(image), cmap='Greys_r', vmin=0, vmax=1, alpha=0.5, extent=[0, image.shape[1], 0, image.shape[0]], origin='lower', aspect='auto')
+        ax.imshow(np.ones_like(image), cmap='Greys_r', vmin=0, vmax=1, alpha=0.5, extent=[0, image.shape[1], 0, image.shape[0]], origin='lower', aspect=1)
         ax.scatter(edge_points[:, 0], edge_points[:, 1], c=cluster_labels, cmap='Paired', alpha=0.5)
         ax.scatter(out_edge[:, 0], out_edge[:, 1], c='red', label='Selected edge points')
         ax.legend()
@@ -328,6 +335,8 @@ def fit_edge(drop_edges, guess_bound=0.1, filter_r_thr=None, frame_n=None, print
         iof.printlog('WARNING: fit with nonlinear droplet deformation did not converge. Second order parameter only', flog)
         popt, pcov = guessp, None
         perr = np.zeros_like(guessp)
+    r_ellipse = r_theta_ellipse(theta, *popt_crc, *popt_ell)
+    r_mserr_ell = np.mean(np.square(r - r_ellipse))
     r_fit = r_theta_higherorder(theta, *popt)
     r_mserr = np.mean(np.square(r - r_fit))
     non_ellip = np.sum(np.abs(popt[4:]))/np.abs(popt[3])
@@ -352,6 +361,7 @@ def fit_edge(drop_edges, guess_bound=0.1, filter_r_thr=None, frame_n=None, print
            'g5_er' : perr[6],
            'R2'    : calc_r2(r, r_fit),
            'mserr' : r_mserr,
+           'mserr_ell' : r_mserr_ell,
            'rmean' : np.mean(r),
            'rawg2' : guess_g2,
            'r0_el' : guess_rbar,
@@ -364,13 +374,13 @@ def fit_edge(drop_edges, guess_bound=0.1, filter_r_thr=None, frame_n=None, print
     if plot:
         # Plot the reconstructed droplet shape
         theta_fit = np.linspace(-np.pi, np.pi, 1000)
+        r_ellipse_fit = r_theta_ellipse(theta_fit, *popt_crc, *popt_ell)
         r_fit = r_theta_higherorder(theta_fit, *popt)
         r_crc = r_theta_circle(theta_fit, *popt_crc)
-        r_ellipse = r_theta_ellipse(theta_fit, *popt_crc, *popt_ell)
         fig, ax = plt.subplots(figsize=(6, 6))
         ax.plot(x - cx, y - cy, 'k.', label='Data')
         ax.plot(r_crc * np.cos(theta_fit), r_crc * np.sin(theta_fit), 'b:', label=r'Circle ($\bar r=$' + '{0:.1f}px)'.format(guess_rbar))
-        ax.plot(r_ellipse * np.cos(theta_fit), r_ellipse * np.sin(theta_fit), 'g-', label=r'Ellipse ($\gamma_2=$' + '{0:.1f}%)'.format(popt_ell[0]*100))
+        ax.plot(r_ellipse_fit * np.cos(theta_fit), r_ellipse_fit * np.sin(theta_fit), 'g-', label=r'Ellipse ($\gamma_2=$' + '{0:.1f}%)'.format(popt_ell[0]*100))
         ax.plot(r_fit * np.cos(theta_fit), r_fit * np.sin(theta_fit), 'r--', lw=2, label=r'Fit ($\Sigma\gamma_{n>2}/\gamma_2=$' + '{0:.2f})'.format(non_ellip))
         ax.set_aspect('equal')
         ax.yaxis.set_major_locator(ax.xaxis.get_major_locator())
@@ -397,7 +407,7 @@ def fit_edge(drop_edges, guess_bound=0.1, filter_r_thr=None, frame_n=None, print
         strout += '\nElliptical deformation: guess={0:.2f}%, elliptical fit={1:.2f}%, Final fit={2:.2f}%'.format(res['rawg2']*100, res['g2_el']*100, res['g2']*100)
         strout += '\nHigher-order deformation coefficients: g3={0:.2f}%, g4={1:.2f}%, g4={2:.2f}%'.format(res['g3']*100, res['g4']*100, res['g5']*100)
         strout += '\nNon-elliptical deformation parameter: {0:.3f}'.format(res['nonel'])
-        strout += '\nRMS fit error: {0:.2f} px, fit R2: {1:.3f}'.format(res['mserr'], res['R2'])
+        strout += '\nRMS fit error: {0:.3f} px (elliptical RMS error: {1:.3f} px), fit R2: {2:.3f}'.format(res['mserr'], res['mserr_ell'], res['R2'])
         iof.printlog(strout, flog)
             
     return res
@@ -543,7 +553,8 @@ def filter_droplets(track_df, thr_relstd, thr_mserr, allowed_badpoints=0, PID_li
     return pID_subset
 
 def plot_lissajous(track_df, pID_subset=None, mod_df=None, drop_sort='Gp', recalc_stress=False, 
-                   px_size=1, fps=1, eta=1, ss_maxtomean=None, plot_alpha=0.3, save_fig=None):
+                   px_size=1, fps=1, eta=1, ss_maxtomean=None, plot_alpha=0.3, save_fig=None, 
+                   save_txt=None, save_txt_format='stacked'):
     if recalc_stress or 'stress' not in track_df.columns:
         pID_subset_stress = track_postproc(track_df, px_size=px_size, fps=fps, eta=eta, ss_maxtomean=ss_maxtomean, plot=False, verbose=0)
         if pID_subset is not None:
@@ -551,12 +562,15 @@ def plot_lissajous(track_df, pID_subset=None, mod_df=None, drop_sort='Gp', recal
             
     if pID_subset is None:
         pID_subset = track_df['particle'].unique()
-
     if mod_df is not None:
-        if drop_sort is mod_df.columns:
+        if drop_sort in mod_df.columns:
             pID_subset = [x for _, x in sorted(zip(mod_df[drop_sort], pID_subset))]
+            
     colors = plt.cm.jet(np.linspace(0,1,len(pID_subset)))
     fig, ax = plt.subplots(2,2)
+    save_data = []
+    hdr_fields = ['t', 'stress', 'g2', 'stress_fit', 'strain_fit']
+    save_hdr = []
     for i in range(len(pID_subset)):
         pID = pID_subset[i]
         cur_subdf = track_df[(track_df['particle'] == pID)]
@@ -564,6 +578,9 @@ def plot_lissajous(track_df, pID_subset=None, mod_df=None, drop_sort='Gp', recal
         ax[0,0].plot(t, cur_subdf['stress'], 'o', color=colors[i], alpha=plot_alpha, label=str(pID))
         ax[1,1].plot(cur_subdf['fit_g2'], t, 'o', color=colors[i], alpha=plot_alpha)
         ax[0,1].plot(cur_subdf['fit_g2'], cur_subdf['stress'], 'o', color=colors[i], alpha=plot_alpha)
+        save_data.append([t, cur_subdf['stress'], cur_subdf['fit_g2']])
+        hdr_pre = 'P{0}_'.format(pID)
+        save_hdr.extend([hdr_pre+lbl for lbl in hdr_fields[:3]])
         if mod_df is not None:
             if len(mod_df)>0:
                 mod_curp = mod_df[(mod_df['particle'] == pID)]
@@ -573,7 +590,8 @@ def plot_lissajous(track_df, pID_subset=None, mod_df=None, drop_sort='Gp', recal
                     ax[0,0].plot(t, stress_fit, '--', color=colors[i])
                     ax[1,1].plot(strain_fit, t, '--', color=colors[i])
                     ax[0,1].plot(strain_fit, stress_fit, '--', color=colors[i])
-                    pass
+                    save_data[-1].extend([stress_fit, strain_fit])
+                    save_hdr.extend([hdr_pre+lbl for lbl in hdr_fields[3:]])
             
     ax[1,0].set_visible(False)
     ax[0,1].xaxis.set_visible(False)
@@ -586,7 +604,52 @@ def plot_lissajous(track_df, pID_subset=None, mod_df=None, drop_sort='Gp', recal
     
     if save_fig is not None:
         fig.savefig(save_fig)
-    
+        
+    if save_txt is not None:
+        if save_txt_format=='stacked':
+            num_rows = np.sum([len(v[0]) for v in save_data])
+            num_cols = np.max([len(v) for v in save_data])
+            save_arr = np.ones((num_rows, num_cols), dtype=float) * np.nan
+            cur_row = 0
+            for i in range(len(save_data)):
+                cur_len = len(save_data[i][0])
+                for j in range(len(save_data[i])):
+                    save_arr[cur_row:cur_row+cur_len, j] = save_data[i][j]
+                cur_row += len(save_data[i][0])
+            if num_cols>3:
+                save_hdr = '\t'.join(hdr_fields)
+            else:
+                save_hdr = '\t'.join(hdr_fields[:3])
+        elif save_txt_format=='avg':
+            num_rows = np.max([len(v[0]) for v in save_data])
+            num_cols = np.max([len(v) for v in save_data])
+            save_arr = np.ones((num_rows, 2*num_cols), dtype=float) * np.nan
+            save_hdr = ['t', 'count']
+            for i in range(num_cols):
+                temp_arr = np.ones((num_rows, len(save_data)), dtype=float) * np.nan
+                for j in range(len(save_data)):
+                    if len(save_data[j]) > i:
+                        temp_arr[:len(save_data[j][0]), j] = save_data[j][i]
+                save_arr[:,2*i] = np.nanmean(temp_arr, axis=1)
+                if i==0:
+                    save_arr[:,1] = np.sum(~np.isnan(temp_arr), axis=1)
+                else:
+                    save_arr[:,2*i+1] = np.nanstd(temp_arr, axis=1)
+                    save_hdr.extend([hdr_fields[i]+'_avg', hdr_fields[i]+'_std'])
+            save_hdr = '\t'.join(save_hdr)
+        else:
+            num_rows = np.max([len(v[0]) for v in save_data])
+            num_cols = np.sum([len(v) for v in save_data])
+            save_arr = np.ones((num_rows, num_cols), dtype=float) * np.nan
+            cur_col = 0
+            for i in range(len(save_data)):
+                cur_len = len(save_data[i][0])
+                for j in range(len(save_data[i])):
+                    save_arr[:cur_len, cur_col+j] = save_data[i][j]
+                cur_col += len(save_data[i])
+            save_hdr = '\t'.join(save_hdr)
+        np.savetxt(save_txt, save_arr, delimiter='\t', header=save_hdr)
+        
     return pID_subset
 
 def sin_oscill(t, omega, A, phi, yoff):

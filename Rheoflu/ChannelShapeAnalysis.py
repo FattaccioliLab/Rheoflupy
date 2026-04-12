@@ -194,17 +194,7 @@ def plot_solution(omega, sigma, q, eta, L0, beta=1, zeta=1):
     ax[1].axhline(y=0.5*(L0+dimensional_amplitude(omega=omega, sigma=sigma, q=q, eta=eta, L0=L0))*1e6, c='b', ls='--')
     
     
-def AnalyzeChannelShape(channel_img, topedge, bottomedge, crop=None, px_size=1, q=None, design_omega=300, eta=1.7e-2, spl_smoothf=10, beta=1, zeta=1, save_fig=None):
-    if isinstance(channel_img, str):
-        img_arr = np.array(Image.open(channel_img), dtype=float)
-    else:
-        img_arr = channel_img
-    if crop is None:
-        crop = [0, 0, 0, 0]
-    if (crop[2] <= 0):
-        crop[2] = img_arr.shape[1]+crop[2]
-    if (crop[3] <= 0):
-        crop[3] = img_arr.shape[0]+crop[3]
+def AnalyzeChannelShape(channel_img, topedge, bottomedge, crop=None, px_size=1, q=None, design_omega=300, eta=1.7e-2, spl_smoothf=10, beta=1, zeta=1, save_fig=None, save_data=None):
     if isinstance(topedge, str):
         if os.path.isfile(topedge):
             topedge = np.loadtxt(topedge)
@@ -217,6 +207,27 @@ def AnalyzeChannelShape(channel_img, topedge, bottomedge, crop=None, px_size=1, 
     if bottomedge is not None:
         bottomedge *= px_size
         spl_bottom = UnivariateSpline(bottomedge[:,0], bottomedge[:,1], s=spl_smoothf)
+    if channel_img is None:
+        max_x, max_y = 0, 0
+        if topedge is not None:
+            max_x, max_y = np.max(topedge[:,0]) / px_size, np.max(topedge[:,1]) / px_size
+        if bottomedge is not None:
+            max_x, max_y = max(max_x, np.max(bottomedge[:,0]) / px_size), max(max_y, np.max(bottomedge[:,1]) / px_size)
+        max_x, max_y = int(max_x), int(max_y)
+        if max_x*max_y > 0:
+            img_arr = np.ones((max_y, max_x))
+        else:
+            raise ValueError('ERROR')
+    elif isinstance(channel_img, str):
+        img_arr = np.array(Image.open(channel_img), dtype=float)
+    else:
+        img_arr = channel_img
+    if crop is None:
+        crop = [0, 0, 0, 0]
+    if (crop[2] <= 0):
+        crop[2] = img_arr.shape[1]+crop[2]
+    if (crop[3] <= 0):
+        crop[3] = img_arr.shape[0]+crop[3]
     spl_xarr = np.arange(int(img_arr.shape[1]*px_size))
     
     x, L = 1e-6*spl_xarr, 1e-6*np.abs(spl_top(spl_xarr) - spl_bottom(spl_xarr))
@@ -263,15 +274,31 @@ def AnalyzeChannelShape(channel_img, topedge, bottomedge, crop=None, px_size=1, 
     ax.set_xlabel(r'$x$ [µm]')
     
     ax2 = ax.twinx()
-    ax2.plot(x*1e6, stress_from_shape(x, L, q=q, eta=eta), 'm-', lw=2, label=r'$\sigma=-q\eta L^\prime/L^2$')
-    ax2.plot(x[min_idx[0]:min_idx[1]]*1e6, sin_stress(t[min_idx[0]:min_idx[1]], stramp, omega, phi), 'y--', lw=2, label=r'$\bar\sigma_f \sin(\omega_f t+\phi_f)$')
-    ax2.plot(x*1e6, sin_stress(t-t[min_idx[0]], stramp, design_omega, phi=np.pi), 'r:', lw=4, label=r'$\bar\sigma \sin(\omega (t-t_0))$')
+    ch_stress = stress_from_shape(x, L, q=q, eta=eta)
+    ax2.plot(x*1e6, ch_stress, 'm-', lw=2, label=r'$\sigma=-q\eta L^\prime/L^2$')
+    ch_sinfit = sin_stress(t, stramp, omega, phi)
+    ax2.plot(x[min_idx[0]:min_idx[1]]*1e6, ch_sinfit[min_idx[0]:min_idx[1]], 'y--', lw=2, label=r'$\bar\sigma_f \sin(\omega_f t+\phi_f)$')
+    ch_sinfit_design = sin_stress(t-t[min_idx[0]], stramp, design_omega, phi=np.pi)
+    ax2.plot(x*1e6, ch_sinfit_design, 'r:', lw=4, label=r'$\bar\sigma \sin(\omega (t-t_0))$')
     ax2.legend()
     ax2.set_ylabel(r'$\sigma$ [Pa]')
     ax2.set_ylim([-1.2*stramp,1.2*stramp])
     
     if save_fig is not None:
         fig.savefig(save_fig)
+        
+    if save_data is not None:
+        save_cols = [x, t, L,
+                     spl_top(spl_xarr),
+                     spl_bottom(spl_xarr),
+                     ch_stress,
+                     ch_sinfit,
+                     ch_sinfit_design]
+        save_hdr = ['x[m]', 't[s]', 'L[m]', 'edge1[um]', 'edge2[um]', 
+                    'stress[Pa](q={0:.3f}mm2/s)'.format(q*1e6), 
+                    'sinfit(A={0:.3f}Pa;w={1:.1f}rad/s;phi={2:.2f}rad)'.format(stramp, omega, phi),
+                    'sinfit(A={0:.3f}Pa;w={1:.1f}rad/s)'.format(stramp, design_omega)]
+        np.savetxt(save_data, np.asarray(save_cols).T, delimiter='\t', header='\t'.join(save_hdr))
     
     print('Constriction parameters:')
     print('omega = {0:.1f} [rad/s]'.format(omega))

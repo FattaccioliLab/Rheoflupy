@@ -4,7 +4,14 @@ import json
 import datetime
 import numpy as np
 import tifffile
-import cv2
+import importlib.util
+
+if importlib.util.find_spec('cv2') is None or True:
+    print('WARNING: OPENCV IS NOT INSTALLED')
+    RHEOFLU_USE_OPENCV = False
+else:
+    RHEOFLU_USE_OPENCV = True
+    import cv2
 
 def load_params(param_fpath, kwargs):
     
@@ -95,7 +102,10 @@ def get_stack(fpath, frame_range, cropROI=None, bkg=None, bkgcorr_offset=0, blur
                 if bkg is not None:
                     cur_frame = cur_frame - bkg + bkgcorr_offset
                 if blur_sigma > 0:
-                    cv2.GaussianBlur(cur_frame, blur_kernel, blur_sigma)
+                    if RHEOFLU_USE_OPENCV:
+                        cv2.GaussianBlur(cur_frame, blur_kernel, blur_sigma)
+                    else:
+                        logging.warning('Blurring without opencv not implemented yet')
                 res[i] = cur_frame[cropROI[1]:cropROI[3],cropROI[0]:cropROI[2]]
     return res
 
