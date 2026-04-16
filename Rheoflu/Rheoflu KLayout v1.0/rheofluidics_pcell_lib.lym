@@ -63,7 +63,7 @@ module RheofluidicsPCells
       xt
     end
 
-    def self.solve_channel(sigma_tilde_list, omega_tilde_list, L0, channel_length, n_periods, npts)
+    def self.solve_channel(sigma_tilde_list, omega_tilde_list, l0, channel_length, n_periods, npts)
       segments = sigma_tilde_list.zip(omega_tilde_list).map do |st, ot|
         tt, lt = solve_Lt_rk4(st, n_periods, npts)
         xt = compute_xt(tt, lt)
@@ -87,23 +87,23 @@ module RheofluidicsPCells
         x_offset = all_x.last
       end
 
-      x_scale    = channel_length / (all_x.last * L0)
-      x_phys     = all_x.map { |v| v * L0 * x_scale }
-      L_phys     = all_L.map { |v| v * L0 }
-      [x_phys, L_phys]
+      x_scale    = channel_length / (all_x.last * l0)
+      x_phys     = all_x.map { |v| v * l0 * x_scale }
+      l_phys     = all_L.map { |v| v * l0 }
+      [x_phys, l_phys]
     end
 
-    def self.build_polygon_dbu(x_arr, L_arr, W_connect, L_taper, dbu, n_taper: 30)
+    def self.build_polygon_dbu(x_arr, l_arr, w_connect, l_taper, dbu, n_taper: 30)
       upper = []
       lower = []
-      W_half = W_connect / 2.0
-      L0_half = L_arr[0]
+      w_half = w_connect / 2.0
+      l0_half = l_arr[0]
 
       # Taper in
       (0..n_taper).each do |i|
         frac = i.to_f / n_taper
-        x = -L_taper + frac * L_taper
-        y = W_half + frac * (L0_half - W_half)
+        x = -l_taper + frac * l_taper
+        y = w_half + frac * (l0_half - w_half)
         upper << RBA::Point.new((x / dbu).round, (y / dbu).round)
         lower << RBA::Point.new((x / dbu).round, (-y / dbu).round)
       end
@@ -111,17 +111,17 @@ module RheofluidicsPCells
       # Channel body
       x_arr.each_with_index do |x, i|
         next if i == 0
-        upper << RBA::Point.new((x / dbu).round, (L_arr[i] / dbu).round)
-        lower << RBA::Point.new((x / dbu).round, (-L_arr[i] / dbu).round)
+        upper << RBA::Point.new((x / dbu).round, (l_arr[i] / dbu).round)
+        lower << RBA::Point.new((x / dbu).round, (-l_arr[i] / dbu).round)
       end
 
       # Taper out
       x_end = x_arr.last
-      L_end = L_arr.last
+      l_end = l_arr.last
       (1..n_taper).each do |i|
         frac = i.to_f / n_taper
-        x = x_end + frac * L_taper
-        y = L_end + frac * (W_half - L_end)
+        x = x_end + frac * l_taper
+        y = l_end + frac * (w_half - l_end)
         upper << RBA::Point.new((x / dbu).round, (y / dbu).round)
         lower << RBA::Point.new((x / dbu).round, (-y / dbu).round)
       end
@@ -139,12 +139,12 @@ module RheofluidicsPCells
     def initialize
       super
       # Common parameters
-      param :L0,            TypeDouble, "Constriction half-width L0 [umm]",             default: 50.0
+      param :l0,            TypeDouble, "Constriction half-width l0 [umm]",             default: 50.0
       param :n_periods,     TypeInt,    "Periods per segment",                          default: 2
       param :channel_length,TypeDouble, "Total channel length [umm]",                   default: 10000.0
       param :npts,          TypeInt,    "Points per segment (resolution)",              default: 500
-      param :W_connect,     TypeDouble, "Connecting channel width [umm]",               default: 200.0
-      param :L_taper,       TypeDouble, "Taper length [umm]",                           default: 200.0
+      param :w_connect,     TypeDouble, "Connecting channel width [umm]",               default: 200.0
+      param :l_taper,       TypeDouble, "Taper length [umm]",                           default: 200.0
       param :layer,         TypeLayer,  "Layer",                                        default: RBA::LayerInfo.new(1, 0)
     end
 
@@ -160,17 +160,17 @@ module RheofluidicsPCells
     def produce_impl(sigma_tilde_list, omega_tilde_list)
       dbu = layout.dbu * 1e-6  # m per DBU
 
-      L0_m          = L0            * 1e-6
+      l0_m          = l0            * 1e-6
       chan_length_m  = channel_length * 1e-6
-      W_connect_m   = W_connect     * 1e-6
-      L_taper_m     = L_taper       * 1e-6
+      w_connect_m   = w_connect     * 1e-6
+      l_taper_m     = l_taper       * 1e-6
 
-      x_arr, L_arr = Engine.solve_channel(
+      x_arr, l_arr = Engine.solve_channel(
         sigma_tilde_list, omega_tilde_list,
-        L0_m, chan_length_m, n_periods, npts
+        l0_m, chan_length_m, n_periods, npts
       )
 
-      poly = Engine.build_polygon_dbu(x_arr, L_arr, W_connect_m, L_taper_m, dbu)
+      poly = Engine.build_polygon_dbu(x_arr, l_arr, w_connect_m, l_taper_m, dbu)
       cell.shapes(layer_layer).insert(poly)
     end
 
@@ -183,12 +183,12 @@ module RheofluidicsPCells
 
     def initialize
       super
-      param :sigma_tilde, TypeDouble, "sigma_tilde x L0^2 (dimensionless stress)",    default: 0.23
-      param :omega_tilde, TypeDouble, "omega_tilde x L0^2 (dimensionless frequency)", default: 0.46
+      param :sigma_tilde, TypeDouble, "sigma_tilde x l0^2 (dimensionless stress)",    default: 0.23
+      param :omega_tilde, TypeDouble, "omega_tilde x l0^2 (dimensionless frequency)", default: 0.46
     end
 
     def display_text_impl
-      "RheoChannel_Constant(L0=#{L0}umm, sigma_tilde=#{sigma_tilde}, omega_tilde=#{omega_tilde}, N=#{n_periods})"
+      "RheoChannel_Constant(l0=#{l0}umm, sigma_tilde=#{sigma_tilde}, omega_tilde=#{omega_tilde}, N=#{n_periods})"
     end
 
     def produce_impl
@@ -210,7 +210,7 @@ module RheofluidicsPCells
 
     def display_text_impl
       n = sigma_tilde_list.split(",").size
-      "RheoChannel_Chirp(L0=#{L0}umm, #{n} segments, N=#{n_periods}/seg)"
+      "RheoChannel_Chirp(l0=#{l0}umm, #{n} segments, N=#{n_periods}/seg)"
     end
 
     def coerce_parameters_impl

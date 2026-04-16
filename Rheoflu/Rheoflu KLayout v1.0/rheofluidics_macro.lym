@@ -25,17 +25,17 @@
 # The channel profile solves eq.(1) of the paper:
 #   dL/dx = L^2 * (sigma0/q*eta) * sin(omega/q * integral_0^x L(s)ds)
 #
-# In dimensionless form (sigma_tilde = sigma0*L0^2, omega_tilde = omega*L0^2/q):
+# In dimensionless form (sigma_tilde = sigma0*l0^2, omega_tilde = omega*l0^2/q):
 #   dL~/dx~ = L~^2 * sigma_tilde * sin(omega_tilde * integral_0^{x~} L~(s~)ds~)
 #
 # Parameters exposed (SI units, converted to DBU internally):
-#   L0            : minimum channel half-width at constriction [m]
-#   sigma_tilde   : dimensionless stress amplitude = sigma0*L0^2 / (q*eta)
-#   omega_tilde   : dimensionless frequency = omega*L0^2 / q  (= omega/q * L0^2)
+#   l0            : minimum channel half-width at constriction [m]
+#   sigma_tilde   : dimensionless stress amplitude = sigma0*l0^2 / (q*eta)
+#   omega_tilde   : dimensionless frequency = omega*l0^2 / q  (= omega/q * l0^2)
 #   n_periods     : number of oscillation periods per segment
 #   channel_length: total channel length [m] (sets q via k scaling)
-#   W_connect     : width of connecting straight channel [m]
-#   L_taper       : length of linear taper between W_connect and L0 [m]
+#   w_connect     : width of connecting straight channel [m]
+#   l_taper       : length of linear taper between w_connect and l0 [m]
 #   layer         : GDS layer number
 #   datatype      : GDS datatype number
 #   dbu           : database unit [m/unit], default 1e-9 (1 nm)
@@ -92,20 +92,20 @@ module Rheofluidics
   # ---------------------------------------------------------------------------
   # Multi-segment solver with total length constraint
   # Scales xt so that the concatenated profile has the desired channel_length.
-  # Returns [x_phys, L_phys] in metres.
+  # Returns [x_phys, l_phys] in metres.
   # ---------------------------------------------------------------------------
-  def self.solve_channel(sigma_tilde_list, omega_tilde_list, L0, channel_length, n_periods, npts)
+  def self.solve_channel(sigma_tilde_list, omega_tilde_list, l0, channel_length, n_periods, npts)
     # For each segment, solve dimensionless profile
     segments = []
     sigma_tilde_list.zip(omega_tilde_list).each do |st, ot|
       xt, lt = solve_segment_dimless(st, n_periods, npts)
-      # omega_tilde = omega*L0^2/q sets the x-scale relative to L0
+      # omega_tilde = omega*l0^2/q sets the x-scale relative to l0
       # k = omega_tilde for each segment; relative k sets x-stretch between segments
       segments << { xt: xt, lt: lt, omega_tilde: ot }
     end
 
     # Concatenate with relative x-scaling by omega_tilde
-    # x_phys_i = xt_i / (omega_tilde_i / omega_tilde_ref) * (L0 / k_global)
+    # x_phys_i = xt_i / (omega_tilde_i / omega_tilde_ref) * (l0 / k_global)
     ot_ref = segments[0][:omega_tilde]
     all_x = []
     all_L = []
@@ -124,31 +124,31 @@ module Rheofluidics
     end
 
     # Scale to physical channel_length
-    x_scale = channel_length / (all_x.last * L0)
-    all_x_phys = all_x.map { |v| v * L0 * x_scale }
-    all_L_phys = all_L.map { |v| v * L0 }
+    x_scale = channel_length / (all_x.last * l0)
+    all_x_phys = all_x.map { |v| v * l0 * x_scale }
+    all_l_phys = all_L.map { |v| v * l0 }
 
-    [all_x_phys, all_L_phys]
+    [all_x_phys, all_l_phys]
   end
 
   # ---------------------------------------------------------------------------
   # Build polygon points for the full channel
   # Returns array of [x, y] in metres (physical coordinates)
   # ---------------------------------------------------------------------------
-  def self.build_polygon(x_arr, L_arr, W_connect, L_taper)
+  def self.build_polygon(x_arr, l_arr, w_connect, l_taper)
     # Upper profile: taper_in | channel | taper_out
     upper = []
     lower = []
 
-    L0 = L_arr[0]  # half-width at constriction (start)
-    W_half = W_connect / 2.0
+    l0 = l_arr[0]  # half-width at constriction (start)
+    w_half = w_connect / 2.0
 
-    # Taper in: from -L_taper to 0
+    # Taper in: from -l_taper to 0
     n_taper = 20
     (0..n_taper).each do |i|
       frac = i.to_f / n_taper
-      x = -L_taper + frac * L_taper
-      y = W_half + frac * (L0 - W_half)
+      x = -l_taper + frac * l_taper
+      y = w_half + frac * (l0 - w_half)
       upper << [x, y]
       lower << [x, -y]
     end
@@ -156,17 +156,17 @@ module Rheofluidics
     # Channel body (skip first point, already at x=0)
     x_arr.each_with_index do |x, i|
       next if i == 0
-      upper << [x, L_arr[i]]
-      lower << [x, -L_arr[i]]
+      upper << [x, l_arr[i]]
+      lower << [x, -l_arr[i]]
     end
 
-    # Taper out: from channel end to channel_end + L_taper
+    # Taper out: from channel end to channel_end + l_taper
     x_end = x_arr.last
-    L_end = L_arr.last
+    l_end = l_arr.last
     (1..n_taper).each do |i|
       frac = i.to_f / n_taper
-      x = x_end + frac * L_taper
-      y = L_end + frac * (W_half - L_end)
+      x = x_end + frac * l_taper
+      y = l_end + frac * (w_half - l_end)
       upper << [x, y]
       lower << [x, -y]
     end
@@ -221,9 +221,9 @@ module Rheofluidics
     ch_group = RBA::QGroupBox.new("Channel parameters", dialog)
     ch_layout = RBA::QVBoxLayout.new(ch_group)
 
-    add_field.call(ch_layout, "L0 -- constriction half-width [umm]",           :L0,            "50")
-    add_field.call(ch_layout, "sigma_tilde x L0^2 (dimensionless stress)",    :sigma_tilde,   "0.23")
-    add_field.call(ch_layout, "omega_tilde x L0^2 (dimensionless frequency)", :omega_tilde,   "0.46")
+    add_field.call(ch_layout, "l0 -- constriction half-width [umm]",           :l0,            "50")
+    add_field.call(ch_layout, "sigma_tilde x l0^2 (dimensionless stress)",    :sigma_tilde,   "0.23")
+    add_field.call(ch_layout, "omega_tilde x l0^2 (dimensionless frequency)", :omega_tilde,   "0.46")
     add_field.call(ch_layout, "N periods per segment",                        :n_periods,     "2")
     add_field.call(ch_layout, "Total channel length [umm]",                    :chan_length,   "10000")
     add_field.call(ch_layout, "Pts per segment (resolution)",                 :npts,          "500")
@@ -243,8 +243,8 @@ module Rheofluidics
     # Connection parameters
     conn_group = RBA::QGroupBox.new("Connection to straight channel", dialog)
     conn_layout = RBA::QVBoxLayout.new(conn_group)
-    add_field.call(conn_layout, "W_connect -- straight channel width [umm]", :W_connect, "200")
-    add_field.call(conn_layout, "L_taper -- taper length [umm]",             :L_taper,   "200")
+    add_field.call(conn_layout, "w_connect -- straight channel width [umm]", :w_connect, "200")
+    add_field.call(conn_layout, "l_taper -- taper length [umm]",             :l_taper,   "200")
     layout_w.addWidget(conn_group)
 
     # Layer
@@ -268,12 +268,12 @@ module Rheofluidics
       begin
         dbu = RBA::Application.instance.main_window.current_view.cellview(0).layout.dbu * 1e-6  # m/DBU
 
-        L0          = fields[:L0].text.to_f         * 1e-6
+        l0          = fields[:l0].text.to_f         * 1e-6
         n_periods   = fields[:n_periods].text.to_i
         chan_length  = fields[:chan_length].text.to_f * 1e-6
         npts        = fields[:npts].text.to_i
-        W_connect   = fields[:W_connect].text.to_f  * 1e-6
-        L_taper     = fields[:L_taper].text.to_f    * 1e-6
+        w_connect   = fields[:w_connect].text.to_f  * 1e-6
+        l_taper     = fields[:l_taper].text.to_f    * 1e-6
         layer_n     = fields[:layer].text.to_i
         datatype_n  = fields[:datatype].text.to_i
 
@@ -288,8 +288,8 @@ module Rheofluidics
           raise "sigma and omega lists must have the same length" unless sigma_tilde_list.size == omega_tilde_list.size
         end
 
-        x_arr, L_arr = Rheofluidics.solve_channel(sigma_tilde_list, omega_tilde_list, L0, chan_length, n_periods, npts)
-        pts_phys = Rheofluidics.build_polygon(x_arr, L_arr, W_connect, L_taper)
+        x_arr, l_arr = Rheofluidics.solve_channel(sigma_tilde_list, omega_tilde_list, l0, chan_length, n_periods, npts)
+        pts_phys = Rheofluidics.build_polygon(x_arr, l_arr, w_connect, l_taper)
         dpts = Rheofluidics.to_dpoints(pts_phys, dbu)
 
         view   = RBA::Application.instance.main_window.current_view
